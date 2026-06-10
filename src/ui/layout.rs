@@ -337,7 +337,7 @@ impl View for Layout {
         self.cmdline.layout(Vec2::new(size.x, 1));
 
         if let Some(view) = self.get_current_view_mut() {
-            view.layout(Vec2::new(size.x, size.y - 3));
+            view.layout(Vec2::new(size.x, size.y.saturating_sub(3)));
         }
     }
 

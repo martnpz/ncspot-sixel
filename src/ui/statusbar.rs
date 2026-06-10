@@ -8,6 +8,7 @@ use cursive::traits::View;
 use cursive::vec::Vec2;
 use unicode_width::UnicodeWidthStr;
 
+use crate::config::IconKind;
 use crate::library::Library;
 use crate::model::playable::Playable;
 use crate::queue::{Queue, RepeatSetting};
@@ -33,28 +34,22 @@ impl StatusBar {
         }
     }
 
-    fn use_nerdfont(&self) -> bool {
-        self.library.cfg.values().use_nerdfont.unwrap_or(false)
-    }
-
-    fn playback_indicator(&self) -> &str {
+    fn playback_indicator(&self) -> String {
         let status = self.spotify.get_current_status();
-        let nerdfont = self.use_nerdfont();
-        let flipped = self
-            .library
-            .cfg
-            .values()
-            .flip_status_indicators
-            .unwrap_or(false);
+        let cfg = &self.library.cfg;
+        let flipped = cfg.values().flip_status_indicators.unwrap_or(false);
 
-        const NF_PLAY: &str = "\u{f04b} ";
-        const NF_PAUSE: &str = "\u{f04c} ";
-        const NF_STOP: &str = "\u{f04d} ";
-        let indicators = match (nerdfont, flipped) {
-            (false, false) => ("▶ ", "▮▮", "◼ "),
-            (false, true) => ("▮▮", "▶ ", "▶ "),
-            (true, false) => (NF_PLAY, NF_PAUSE, NF_STOP),
-            (true, true) => (NF_PAUSE, NF_PLAY, NF_PLAY),
+        let (play, pause, stop) = (
+            cfg.icon(IconKind::Playing),
+            cfg.icon(IconKind::Paused),
+            cfg.icon(IconKind::Stopped),
+        );
+        // When flipped, show the icon of the action that pressing play/pause
+        // would trigger instead of the current state.
+        let indicators = if flipped {
+            (pause.clone(), play.clone(), play)
+        } else {
+            (play, pause, stop)
         };
 
         match status {
@@ -120,41 +115,25 @@ impl View for StatusBar {
         });
 
         printer.with_color(style, |printer| {
-            printer.print((1, 1), self.playback_indicator());
+            printer.print((1, 1), &self.playback_indicator());
         });
 
         let updating = if !*self.library.is_done.read().unwrap() {
-            if self.use_nerdfont() {
-                "\u{f04e6} "
-            } else {
-                "[U] "
-            }
+            self.library.cfg.icon(IconKind::Updating)
         } else {
-            ""
+            String::new()
         };
 
-        let repeat = if self.use_nerdfont() {
-            match self.queue.get_repeat() {
-                RepeatSetting::None => "",
-                RepeatSetting::RepeatPlaylist => "\u{f0456} ",
-                RepeatSetting::RepeatTrack => "\u{f0458} ",
-            }
-        } else {
-            match self.queue.get_repeat() {
-                RepeatSetting::None => "",
-                RepeatSetting::RepeatPlaylist => "[R] ",
-                RepeatSetting::RepeatTrack => "[R1] ",
-            }
+        let repeat = match self.queue.get_repeat() {
+            RepeatSetting::None => String::new(),
+            RepeatSetting::RepeatPlaylist => self.library.cfg.icon(IconKind::Repeat),
+            RepeatSetting::RepeatTrack => self.library.cfg.icon(IconKind::RepeatTrack),
         };
 
         let shuffle = if self.queue.get_shuffle() {
-            if self.use_nerdfont() {
-                "\u{f049d} "
-            } else {
-                "[Z] "
-            }
+            self.library.cfg.icon(IconKind::Shuffle)
         } else {
-            ""
+            String::new()
         };
 
         let volume = self.volume_display();
@@ -173,9 +152,9 @@ impl View for StatusBar {
             None => "".to_string(),
         };
 
-        let right = updating.to_string()
-            + repeat
-            + shuffle
+        let right = updating
+            + &repeat
+            + &shuffle
             // + saved
             + &playback_duration_status
             + &volume;

@@ -9,6 +9,7 @@ use rand::prelude::*;
 use strum_macros::Display;
 
 use crate::config::Config;
+use crate::events::{Event, EventManager};
 use crate::library::Library;
 use crate::model::playable::Playable;
 use crate::spotify::PlayerEvent;
@@ -44,12 +45,18 @@ pub struct Queue {
     random_order: RwLock<Option<Vec<usize>>>,
     current_track: RwLock<Option<usize>>,
     spotify: Spotify,
+    events: EventManager,
     cfg: Arc<Config>,
     library: Arc<Library>,
 }
 
 impl Queue {
-    pub fn new(spotify: Spotify, cfg: Arc<Config>, library: Arc<Library>) -> Self {
+    pub fn new(
+        spotify: Spotify,
+        events: EventManager,
+        cfg: Arc<Config>,
+        library: Arc<Library>,
+    ) -> Self {
         let queue_state = cfg.state().queuestate.clone();
 
         Self {
@@ -57,6 +64,7 @@ impl Queue {
             spotify: spotify.clone(),
             current_track: RwLock::new(queue_state.current_track),
             random_order: RwLock::new(queue_state.random_order),
+            events,
             cfg,
             library,
         }
@@ -315,6 +323,9 @@ impl Queue {
             // Send a Seeked signal at start of new track
             #[cfg(feature = "mpris")]
             self.spotify.notify_seeked(0);
+
+            self.events
+                .send(Event::TrackChanged(Box::new((*track).clone())));
         }
 
         if reshuffle && self.get_shuffle() {
@@ -498,19 +509,12 @@ pub fn send_notification(summary_txt: &str, body_txt: &str, cover_url: Option<St
     }
 
     // XDG desktop entry hints
-    #[cfg(all(unix, not(target_os = "macos")))]
     n.urgency(notify_rust::Urgency::Low)
         .hint(notify_rust::Hint::Transient(true))
         .hint(notify_rust::Hint::DesktopEntry("ncspot".into()));
 
     match n.show() {
-        Ok(handle) => {
-            // only available for XDG
-            #[cfg(all(unix, not(target_os = "macos")))]
-            info!("Created notification: {}", handle.id());
-            #[cfg(not(all(unix, not(target_os = "macos"))))]
-            drop(handle);
-        }
+        Ok(handle) => info!("Created notification: {}", handle.id()),
         Err(e) => log::error!("Failed to send notification cover: {e}"),
     }
 }
@@ -560,12 +564,13 @@ mod tests {
         let cfg = Config::new_for_test();
         let ev = EventManager::new_for_test();
         let spotify = Spotify::new_for_test(cfg.clone(), ev.clone());
-        let library = Library::new_for_test(ev, spotify.clone(), cfg.clone());
+        let library = Library::new_for_test(ev.clone(), spotify.clone(), cfg.clone());
         Queue {
             queue: Arc::new(RwLock::new(tracks)),
             random_order: RwLock::new(None),
             current_track: RwLock::new(current),
             spotify,
+            events: ev,
             cfg,
             library,
         }

@@ -245,7 +245,7 @@ Possible configuration values are:
 | Name                            | Description                                                    | Possible values                                                                       | Default             |
 |---------------------------------|----------------------------------------------------------------|---------------------------------------------------------------------------------------|---------------------|
 | `command_key`                   | Key to open command line                                       | Single character                                                                      | `:`                 |
-| `initial_screen`                | Screen to show after startup                                   | `"library"`, `"search"`, `"queue"`, `"cover"`<sup>[1]</sup>                           | `"library"`         |
+| `initial_screen`                | Screen to show after startup                                   | `"panes"`, `"library"`, `"search"`, `"queue"`, `"lyrics"`, `"cover"`<sup>[1]</sup>    | `"panes"`           |
 | `use_nerdfont`                  | Turn nerdfont glyphs on/off                                    | `true`, `false`                                                                       | `false`             |
 | `flip_status_indicators`        | Reverse play/pause icon meaning<sup>[2]</sup>                  | `true`, `false`                                                                       | `false`             |
 | `backend`                       | Audio backend to use                                           | String<sup>[3]</sup>                                                                  |                     |
@@ -270,6 +270,10 @@ Possible configuration values are:
 | `[theme]`                       | Custom theme                                                   | See [custom theme](#theming)                                                          |                     |
 | `[keybindings]`                 | Custom keybindings                                             | See [custom keybindings](#custom-keybindings)                                         |                     |
 | `ap_port`                       | Set ap-port for librespot (for restrictive firewalls)          | `80`, `443`, `4070`                                                                   |                     |
+| `pipewire_quantum`              | Requested PipeWire quantum in frames at 44.1 kHz<sup>[5]</sup> | Number (e.g. `256` ≈ 6 ms, `1024` ≈ 23 ms)                                            | `1024`              |
+| `cover_backend`<sup>[1]</sup>   | Cover art renderer                                             | `"sixel"`, `"ueberzug"`                                                               | auto-detected       |
+| `[layout]`                      | Pane layout of the `panes` screen                              | See [pane layout](#pane-layout)                                                       |                     |
+| `[icons]`                       | Override individual UI icons                                   | See [icons](#icons)                                                                   |                     |
 
 1. If built with the `cover` feature.
 2. By default the statusbar will show a play icon when a track is playing and
@@ -277,6 +281,54 @@ Possible configuration values are:
    is reversed.
 3. Run `ncspot -h` for a list of devices.
 4. If built with the `notify` feature.
+5. If built with the `pipewire_backend` feature. Lower values reduce audio
+   latency at the cost of more frequent wakeups.
+
+### Pane Layout
+
+The `panes` screen shows several views side by side. Columns are defined left
+to right with a width in percent; each column stacks one or more panes
+vertically. Valid pane names are `playlists`, `tracks`, `cover`, `lyrics` and
+`queue`. The default is:
+
+```toml
+[[layout.columns]]
+width = 20
+panes = ["playlists"]
+
+[[layout.columns]]
+width = 40
+panes = ["tracks"]
+
+[[layout.columns]]
+width = 40
+panes = ["cover", "lyrics"]
+```
+
+Move focus between panes with `Tab` (next) or `Alt+h/j/k/l`, or remap the
+`focuspane left|right|up|down|next` command. Opening a playlist from the
+playlists pane shows its tracks in the `tracks` pane.
+
+### Icons
+
+Individual icons can be overridden in the `[icons]` table; unset icons use
+nerd-font defaults when `use_nerdfont` is enabled and ASCII defaults
+otherwise. Available keys: `playing`, `paused`, `stopped`, `repeat`,
+`repeat_track`, `shuffle`, `saved`, `updating`.
+
+```toml
+[icons]
+playing = "▶ "
+saved = "♥"
+```
+
+### Lyrics
+
+The `lyrics` screen (default keybinding `F9`) shows synced lyrics for the
+playing track, fetched from [lrclib.net](https://lrclib.net) with Spotify's
+lyrics API as fallback and cached on disk. The currently sung line is
+highlighted and kept centered; scrolling manually disables following until
+`Back` is pressed or `move playing` is invoked.
 
 ### Custom Keybindings
 Keybindings can be configured in `[keybindings]` section in `config.toml`.

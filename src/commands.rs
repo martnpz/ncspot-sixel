@@ -4,7 +4,8 @@ use std::time::Duration;
 
 use crate::application::UserData;
 use crate::command::{
-    Command, GotoMode, JumpMode, MoveAmount, MoveMode, SeekDirection, ShiftMode, TargetMode, parse,
+    Command, GotoMode, JumpMode, MoveAmount, MoveMode, PaneDirection, SeekDirection, ShiftMode,
+    TargetMode, parse,
 };
 use crate::config::{Config, user_configuration_directory};
 use crate::events::EventManager;
@@ -300,6 +301,10 @@ impl CommandManager {
                 Ok(None)
             }
 
+            // Pane focus movement is only meaningful on the pane screen;
+            // ignore it silently everywhere else.
+            Command::FocusPane(_) => Ok(None),
+
             Command::Queue
             | Command::PlayNext
             | Command::Play
@@ -470,8 +475,25 @@ impl CommandManager {
         kb.insert("F1".into(), vec![Command::Focus("queue".into())]);
         kb.insert("F2".into(), vec![Command::Focus("search".into())]);
         kb.insert("F3".into(), vec![Command::Focus("library".into())]);
+        kb.insert("F4".into(), vec![Command::Focus("panes".into())]);
+
+        kb.insert("Tab".into(), vec![Command::FocusPane(PaneDirection::Next)]);
+        kb.insert(
+            "Alt+h".into(),
+            vec![Command::FocusPane(PaneDirection::Left)],
+        );
+        kb.insert(
+            "Alt+j".into(),
+            vec![Command::FocusPane(PaneDirection::Down)],
+        );
+        kb.insert("Alt+k".into(), vec![Command::FocusPane(PaneDirection::Up)]);
+        kb.insert(
+            "Alt+l".into(),
+            vec![Command::FocusPane(PaneDirection::Right)],
+        );
         #[cfg(feature = "cover")]
         kb.insert("F8".into(), vec![Command::Focus("cover".into())]);
+        kb.insert("F9".into(), vec![Command::Focus("lyrics".into())]);
         kb.insert("?".into(), vec![Command::Help]);
         kb.insert("Backspace".into(), vec![Command::Back]);
 

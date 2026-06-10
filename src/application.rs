@@ -67,6 +67,8 @@ pub struct Application {
     spotify: Spotify,
     /// Internally shared
     event_manager: EventManager,
+    /// Owner of the lyrics for the currently playing track.
+    lyrics_manager: Arc<crate::lyrics::LyricsManager>,
     /// An IPC implementation using the D-Bus MPRIS protocol, used to control and inspect ncspot.
     #[cfg(unix)]
     ipc: Option<IpcSocket>,
@@ -103,15 +105,14 @@ impl Application {
 
         println!("Connecting to Spotify..");
 
+        // Query the terminal before cursive owns it.
+        #[cfg(feature = "cover")]
+        ui::cover::detect_terminal_capabilities();
+
         // DON'T USE STDOUT AFTER THIS CALL!
         let mut cursive = create_cursive().map_err(|error| error.to_string())?;
 
         cursive.set_theme(theme.clone());
-
-        #[cfg(all(unix, feature = "pancurses_backend"))]
-        cursive.add_global_callback(cursive::event::Event::CtrlChar('z'), |_s| unsafe {
-            libc::raise(libc::SIGTSTP);
-        });
 
         let event_manager = EventManager::new(cursive.cb_sink().clone());
 
@@ -126,6 +127,7 @@ impl Application {
 
         let queue = Arc::new(queue::Queue::new(
             spotify.clone(),
+            event_manager.clone(),
             configuration.clone(),
             library.clone(),
         ));
@@ -152,6 +154,7 @@ impl Application {
                 queue_state.track_progress.as_millis() as u32,
             );
             spotify.update_track();
+            event_manager.send(Event::TrackChanged(Box::new(playable.clone())));
             match playback_state {
                 PlaybackState::Stopped => {
                     spotify.stop();
@@ -198,7 +201,22 @@ impl Application {
         let queueview = ui::queue::QueueView::new(queue.clone(), library.clone());
 
         #[cfg(feature = "cover")]
-        let coverview = ui::cover::CoverView::new(queue.clone(), library.clone(), &configuration);
+        let coverview = ui::cover::CoverView::new(
+            queue.clone(),
+            library.clone(),
+            &configuration,
+            event_manager.clone(),
+        );
+
+        let lyrics_manager = Arc::new(crate::lyrics::LyricsManager::new(
+            event_manager.clone(),
+            spotify.clone(),
+        ));
+        let lyricsview = ui::lyrics::LyricsView::new(
+            queue.clone(),
+            spotify.clone(),
+            lyrics_manager.clone(),
+        );
 
         let status = ui::statusbar::StatusBar::new(queue.clone(), Arc::clone(&library));
 
@@ -211,17 +229,68 @@ impl Application {
         #[cfg(feature = "cover")]
         layout.add_screen("cover", coverview.with_name("cover"));
 
-        // initial screen is library
+        layout.add_screen("lyrics", lyricsview.with_name("lyrics"));
+
+        let layout_config = configuration.values().layout.clone().unwrap_or_default();
+        let panes_view = ui::panes::PaneLayoutView::new(&layout_config, |kind| {
+            use crate::traits::IntoBoxedViewExt;
+            match kind {
+                "playlists" => Some(
+                    ui::playlists::PlaylistsView::new(queue.clone(), library.clone())
+                        .into_boxed_view_ext(),
+                ),
+                "tracks" => Some(
+                    ui::panes::PlaceholderPane::new(
+                        "Tracks",
+                        "Open a playlist to show its tracks",
+                    )
+                    .into_boxed_view_ext(),
+                ),
+                #[cfg(feature = "cover")]
+                "cover" => Some(
+                    ui::cover::CoverView::new(
+                        queue.clone(),
+                        library.clone(),
+                        &configuration,
+                        event_manager.clone(),
+                    )
+                    .into_boxed_view_ext(),
+                ),
+                "lyrics" => Some(
+                    ui::lyrics::LyricsView::new(
+                        queue.clone(),
+                        spotify.clone(),
+                        lyrics_manager.clone(),
+                    )
+                    .into_boxed_view_ext(),
+                ),
+                "queue" => Some(
+                    ui::queue::QueueView::new(queue.clone(), library.clone())
+                        .into_boxed_view_ext(),
+                ),
+                _ => None,
+            }
+        });
+        if !panes_view.is_empty() {
+            layout.add_screen("panes", panes_view.with_name("panes"));
+        }
+
+        // initial screen is the pane layout, falling back to library
+        let default_screen = if layout.has_screen("panes") {
+            "panes"
+        } else {
+            "library"
+        };
         let initial_screen = configuration
             .values()
             .initial_screen
             .clone()
-            .unwrap_or_else(|| "library".to_string());
+            .unwrap_or_else(|| default_screen.to_string());
         if layout.has_screen(&initial_screen) {
             layout.set_screen(initial_screen);
         } else {
             error!("Invalid screen name: {initial_screen}");
-            layout.set_screen("library");
+            layout.set_screen(default_screen);
         }
 
         cursive.add_fullscreen_layer(layout.with_name("main"));
@@ -230,6 +299,7 @@ impl Application {
             queue,
             spotify,
             event_manager,
+            lyrics_manager,
             #[cfg(unix)]
             ipc,
             cursive,
@@ -271,6 +341,10 @@ impl Application {
                     }
                     Event::Queue(event) => {
                         self.queue.handle_event(event);
+                    }
+                    Event::TrackChanged(playable) => {
+                        trace!("track changed: {playable}");
+                        self.lyrics_manager.fetch(&playable);
                     }
                     Event::SessionDied => {
                         if self.spotify.start_worker(None).is_err() {

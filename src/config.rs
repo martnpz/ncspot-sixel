@@ -86,6 +86,8 @@ pub struct ConfigValues {
     pub audio_cache_size: Option<u32>,
     pub backend: Option<String>,
     pub backend_device: Option<String>,
+    /// Requested PipeWire quantum in frames at 44100 Hz; lower values reduce output latency.
+    pub pipewire_quantum: Option<u32>,
     pub volnorm: Option<bool>,
     pub volnorm_pregain: Option<f64>,
     pub notify: Option<bool>,
@@ -94,6 +96,8 @@ pub struct ConfigValues {
     pub shuffle: Option<bool>,
     pub repeat: Option<queue::RepeatSetting>,
     pub cover_max_scale: Option<f32>,
+    /// Cover rendering backend: "sixel" or "ueberzug". Auto-detected when unset.
+    pub cover_backend: Option<String>,
     pub playback_state: Option<PlaybackState>,
     pub track_format: Option<TrackFormat>,
     pub notification_format: Option<NotificationFormat>,
@@ -101,6 +105,88 @@ pub struct ConfigValues {
     pub library_tabs: Option<Vec<LibraryTab>>,
     pub hide_display_names: Option<bool>,
     pub ap_port: Option<u16>,
+    pub layout: Option<LayoutConfig>,
+    pub icons: Option<IconsConfig>,
+}
+
+/// User overrides for the icons used across the UI, set in the `[icons]`
+/// table. Unset icons fall back to nerd-font or ASCII defaults depending on
+/// `use_nerdfont`.
+#[derive(Clone, Serialize, Deserialize, Debug, Default)]
+pub struct IconsConfig {
+    pub playing: Option<String>,
+    pub paused: Option<String>,
+    pub stopped: Option<String>,
+    pub repeat: Option<String>,
+    pub repeat_track: Option<String>,
+    pub shuffle: Option<String>,
+    pub saved: Option<String>,
+    pub updating: Option<String>,
+}
+
+/// The icons that can be customized through [IconsConfig].
+#[derive(Clone, Copy, Debug)]
+pub enum IconKind {
+    Playing,
+    Paused,
+    Stopped,
+    Repeat,
+    RepeatTrack,
+    Shuffle,
+    Saved,
+    Updating,
+}
+
+impl IconKind {
+    /// (nerd-font default, ASCII default)
+    fn defaults(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Playing => ("\u{f04b} ", "▶ "),
+            Self::Paused => ("\u{f04c} ", "▮▮"),
+            Self::Stopped => ("\u{f04d} ", "◼ "),
+            Self::Repeat => ("\u{f0456} ", "[R] "),
+            Self::RepeatTrack => ("\u{f0458} ", "[R1] "),
+            Self::Shuffle => ("\u{f049d} ", "[Z] "),
+            Self::Saved => ("\u{f012c}", "✓"),
+            Self::Updating => ("\u{f04e6} ", "[U] "),
+        }
+    }
+}
+
+/// Configuration of the multi-pane "panes" screen.
+#[derive(Clone, Serialize, Deserialize, Debug)]
+pub struct LayoutConfig {
+    pub columns: Vec<ColumnConfig>,
+}
+
+#[derive(Clone, Serialize, Deserialize, Debug)]
+pub struct ColumnConfig {
+    /// Width of the column as a percentage of the screen width.
+    pub width: u8,
+    /// Panes stacked vertically in this column, top to bottom. Valid names:
+    /// playlists, tracks, cover, lyrics, queue.
+    pub panes: Vec<String>,
+}
+
+impl Default for LayoutConfig {
+    fn default() -> Self {
+        Self {
+            columns: vec![
+                ColumnConfig {
+                    width: 20,
+                    panes: vec!["playlists".into()],
+                },
+                ColumnConfig {
+                    width: 40,
+                    panes: vec!["tracks".into()],
+                },
+                ColumnConfig {
+                    width: 40,
+                    panes: vec!["cover".into(), "lyrics".into()],
+                },
+            ],
+        }
+    }
 }
 
 /// The ncspot theme.
@@ -186,9 +272,14 @@ impl Config {
     /// Create a default configuration from in-memory defaults, without touching the filesystem.
     #[cfg(test)]
     pub fn new_for_test() -> std::sync::Arc<Self> {
+        Self::new_for_test_with_values(ConfigValues::default())
+    }
+
+    #[cfg(test)]
+    pub fn new_for_test_with_values(values: ConfigValues) -> std::sync::Arc<Self> {
         std::sync::Arc::new(Self {
             filename: String::new(),
-            values: RwLock::new(ConfigValues::default()),
+            values: RwLock::new(values),
             state: RwLock::new(UserState::default()),
         })
     }
@@ -238,6 +329,34 @@ impl Config {
     /// Get the user configuration values.
     pub fn values(&self) -> RwLockReadGuard<'_, ConfigValues> {
         self.values.read().unwrap()
+    }
+
+    /// Resolve an icon: user override from `[icons]`, then the nerd-font
+    /// default if `use_nerdfont` is set, then the ASCII default.
+    pub fn icon(&self, kind: IconKind) -> String {
+        let values = self.values();
+        let user_icon = values.icons.as_ref().and_then(|icons| {
+            match kind {
+                IconKind::Playing => &icons.playing,
+                IconKind::Paused => &icons.paused,
+                IconKind::Stopped => &icons.stopped,
+                IconKind::Repeat => &icons.repeat,
+                IconKind::RepeatTrack => &icons.repeat_track,
+                IconKind::Shuffle => &icons.shuffle,
+                IconKind::Saved => &icons.saved,
+                IconKind::Updating => &icons.updating,
+            }
+            .clone()
+        });
+
+        user_icon.unwrap_or_else(|| {
+            let (nerdfont, ascii) = kind.defaults();
+            if values.use_nerdfont.unwrap_or(false) {
+                nerdfont.to_string()
+            } else {
+                ascii.to_string()
+            }
+        })
     }
 
     /// Get the runtime user state values.
@@ -364,5 +483,39 @@ pub fn set_configuration_base_path(base_path: Option<PathBuf>) {
             fs::create_dir_all(&basepath).expect("could not create basepath directory");
         }
         *BASE_PATH.write().unwrap() = Some(basepath);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn icon_resolution_precedence() {
+        // ASCII defaults without nerdfont
+        let cfg = Config::new_for_test();
+        assert_eq!(cfg.icon(IconKind::Playing), "▶ ");
+        assert_eq!(cfg.icon(IconKind::Saved), "✓");
+
+        // Nerd-font defaults with use_nerdfont
+        let cfg = Config::new_for_test_with_values(ConfigValues {
+            use_nerdfont: Some(true),
+            ..Default::default()
+        });
+        assert_eq!(cfg.icon(IconKind::Playing), "\u{f04b} ");
+        assert_eq!(cfg.icon(IconKind::Saved), "\u{f012c}");
+
+        // User overrides beat both defaults
+        let cfg = Config::new_for_test_with_values(ConfigValues {
+            use_nerdfont: Some(true),
+            icons: Some(IconsConfig {
+                playing: Some(">> ".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        assert_eq!(cfg.icon(IconKind::Playing), ">> ");
+        // Unset icons still fall back to the nerd-font default
+        assert_eq!(cfg.icon(IconKind::Paused), "\u{f04c} ");
     }
 }

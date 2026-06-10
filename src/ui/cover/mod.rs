@@ -1,23 +1,53 @@
-use std::collections::HashSet;
-use std::io::Write;
-use std::path::PathBuf;
-use std::process::{Child, Stdio};
+pub mod sixel;
+pub mod ueberzug;
 
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::sync::{Arc, RwLock};
 
 use cursive::theme::{ColorStyle, ColorType, PaletteColor};
 use cursive::{Cursive, Printer, Vec2, View};
 use ioctl_rs::{TIOCGWINSZ, ioctl};
-use log::{debug, error};
+use log::{error, info};
 
 use crate::command::{Command, GotoMode};
 use crate::commands::CommandResult;
 use crate::config::Config;
+use crate::events::EventManager;
 use crate::library::Library;
 use crate::queue::Queue;
 use crate::traits::{IntoBoxedViewExt, ListItem, ViewExt};
 use crate::ui::album::AlbumView;
 use crate::ui::artist::ArtistView;
+
+/// Whether the terminal reported sixel support. Probed once before cursive
+/// takes over the terminal.
+static SIXEL_SUPPORT: OnceLock<bool> = OnceLock::new();
+
+/// Probe terminal capabilities used for cover rendering. Must be called
+/// before `create_cursive()`.
+pub fn detect_terminal_capabilities() {
+    let _ = SIXEL_SUPPORT.set(sixel::probe_support());
+}
+
+/// A renderer that can put a cover image onto the terminal.
+trait CoverBackend: Send + Sync {
+    /// Draw the image at `path` into the cell rectangle described by
+    /// `draw_offset`/`draw_size`. Returns whether the image was actually
+    /// drawn (false e.g. while an encode is still in flight).
+    fn draw(
+        &self,
+        url: &str,
+        path: &Path,
+        draw_offset: Vec2,
+        draw_size: Vec2,
+        font_size: Vec2,
+    ) -> bool;
+
+    /// Remove a previously drawn image, where the backend supports it.
+    fn clear(&self);
+}
 
 pub struct CoverView {
     queue: Arc<Queue>,
@@ -25,42 +55,70 @@ pub struct CoverView {
     loading: Arc<RwLock<HashSet<String>>>,
     last_size: RwLock<Vec2>,
     drawn_url: RwLock<Option<String>>,
-    ueberzug: RwLock<Option<Child>>,
-    font_size: Vec2,
+    backend: Box<dyn CoverBackend>,
+    /// Maximum HiDPI scale correction from the config.
+    scale: f32,
 }
 
 impl CoverView {
-    pub fn new(queue: Arc<Queue>, library: Arc<Library>, config: &Config) -> Self {
-        // Determine size of window both in pixels and chars
+    pub fn new(
+        queue: Arc<Queue>,
+        library: Arc<Library>,
+        config: &Config,
+        events: EventManager,
+    ) -> Self {
+        let configured = config.values().cover_backend.clone();
+        let backend: Box<dyn CoverBackend> = match configured.as_deref() {
+            Some("sixel") => Box::new(sixel::SixelBackend::new(events)),
+            Some("ueberzug") => Box::new(ueberzug::UeberzugBackend::new()),
+            Some(other) => {
+                error!(r#"unknown cover_backend "{other}", falling back to ueberzug"#);
+                Box::new(ueberzug::UeberzugBackend::new())
+            }
+            None => {
+                if SIXEL_SUPPORT.get().copied().unwrap_or(false) {
+                    info!("using sixel cover backend");
+                    Box::new(sixel::SixelBackend::new(events))
+                } else {
+                    info!("terminal doesn't support sixel, using ueberzug cover backend");
+                    Box::new(ueberzug::UeberzugBackend::new())
+                }
+            }
+        };
+
+        Self {
+            queue,
+            library,
+            backend,
+            loading: Arc::new(RwLock::new(HashSet::new())),
+            last_size: RwLock::new(Vec2::new(0, 0)),
+            drawn_url: RwLock::new(None),
+            scale: config.values().cover_max_scale.unwrap_or(1.0),
+        }
+    }
+
+    /// The size of a terminal cell in pixels, scaled by `cover_max_scale`.
+    /// Queried per draw so it stays correct across window resizes.
+    fn font_size(&self) -> Vec2 {
         let (rows, cols, mut xpixels, mut ypixels) = unsafe {
             let mut query: (u16, u16, u16, u16) = (0, 0, 0, 0);
             ioctl(1, TIOCGWINSZ, &mut query);
             query
         };
 
-        debug!("Determined window dimensions: {xpixels}x{ypixels}, {cols}x{rows}");
+        xpixels = ((xpixels as f32) / self.scale) as u16;
+        ypixels = ((ypixels as f32) / self.scale) as u16;
 
-        // Determine font size, considering max scale to prevent tiny covers on HiDPI screens
-        let scale = config.values().cover_max_scale.unwrap_or(1.0);
-        xpixels = ((xpixels as f32) / scale) as u16;
-        ypixels = ((ypixels as f32) / scale) as u16;
-
-        let font_size = Vec2::new((xpixels / cols) as usize, (ypixels / rows) as usize);
-
-        debug!("Determined font size: {}x{}", font_size.x, font_size.y);
-
-        Self {
-            queue,
-            library,
-            ueberzug: RwLock::new(None),
-            loading: Arc::new(RwLock::new(HashSet::new())),
-            last_size: RwLock::new(Vec2::new(0, 0)),
-            drawn_url: RwLock::new(None),
-            font_size,
+        // Fall back to a common cell size when the terminal doesn't report
+        // dimensions (e.g. when not running on a real pty).
+        if cols > 0 && rows > 0 && xpixels > 0 && ypixels > 0 {
+            Vec2::new((xpixels / cols) as usize, (ypixels / rows) as usize)
+        } else {
+            Vec2::new(8, 16)
         }
     }
 
-    fn draw_cover(&self, url: String, mut draw_offset: Vec2, draw_size: Vec2) {
+    fn draw_cover(&self, url: String, draw_offset: Vec2, draw_size: Vec2) {
         if draw_size.x <= 1 || draw_size.y <= 1 {
             return;
         }
@@ -80,88 +138,26 @@ impl CoverView {
             None => return,
         };
 
-        let mut img_size = Vec2::new(640, 640);
+        let drawn = self
+            .backend
+            .draw(&url, &path, draw_offset, draw_size, self.font_size());
 
-        let draw_size_pxls = draw_size * self.font_size;
-        let ratio = f32::min(
-            f32::min(
-                draw_size_pxls.x as f32 / img_size.x as f32,
-                draw_size_pxls.y as f32 / img_size.y as f32,
-            ),
-            1.0,
-        );
+        if drawn {
+            let mut last_size = self.last_size.write().unwrap();
+            *last_size = draw_size;
 
-        img_size = Vec2::new(
-            (ratio * img_size.x as f32) as usize,
-            (ratio * img_size.y as f32) as usize,
-        );
-
-        // Ueberzug takes an area given in chars and fits the image to
-        // that area (from the top left). Since we want to center the
-        // image at least horizontally, we need to fiddle around a bit.
-        let mut size = img_size / self.font_size;
-
-        // Make sure there is equal space in chars on either side
-        if size.x % 2 != draw_size.x % 2 {
-            size.x -= 1;
+            let mut drawn_url = self.drawn_url.write().unwrap();
+            *drawn_url = Some(url);
         }
-
-        // Make sure x is the bottleneck so full width is used
-        size.y = std::cmp::min(draw_size.y, size.y + 1);
-
-        // Round up since the bottom might have empty space within
-        // the designated box
-        draw_offset.x += (draw_size.x - size.x) / 2;
-        draw_offset.y += (draw_size.y - size.y) - (draw_size.y - size.y) / 2;
-
-        let cmd = format!(
-            "{{\"action\":\"add\",\"scaler\":\"fit_contain\",\"identifier\":\"cover\",\"x\":{},\"y\":{},\"width\":{},\"height\":{},\"path\":\"{}\"}}\n",
-            draw_offset.x,
-            draw_offset.y,
-            size.x,
-            size.y,
-            path.to_str().unwrap()
-        );
-
-        if let Err(e) = self.run_ueberzug_cmd(&cmd) {
-            error!("Failed to run Ueberzug: {e}");
-            return;
-        }
-
-        let mut last_size = self.last_size.write().unwrap();
-        *last_size = draw_size;
-
-        let mut drawn_url = self.drawn_url.write().unwrap();
-        *drawn_url = Some(url);
     }
 
     fn clear_cover(&self) {
         let mut drawn_url = self.drawn_url.write().unwrap();
+        if drawn_url.is_none() {
+            return;
+        }
         *drawn_url = None;
-
-        let cmd = "{\"action\": \"remove\", \"identifier\": \"cover\"}\n";
-        if let Err(e) = self.run_ueberzug_cmd(cmd) {
-            error!("Failed to run Ueberzug: {e}");
-        }
-    }
-
-    fn run_ueberzug_cmd(&self, cmd: &str) -> Result<(), std::io::Error> {
-        let mut ueberzug = self.ueberzug.write().unwrap();
-
-        if ueberzug.is_none() {
-            *ueberzug = Some(
-                std::process::Command::new("ueberzug")
-                    .args(["layer", "--silent"])
-                    .stdin(Stdio::piped())
-                    .stdout(Stdio::piped())
-                    .spawn()?,
-            );
-        }
-
-        let stdin = (*ueberzug).as_mut().unwrap().stdin.as_mut().unwrap();
-        stdin.write_all(cmd.as_bytes())?;
-
-        Ok(())
+        self.backend.clear();
     }
 
     fn cache_path(&self, url: String) -> Option<PathBuf> {

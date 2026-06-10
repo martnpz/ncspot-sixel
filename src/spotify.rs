@@ -10,7 +10,8 @@ use librespot_core::cache::Cache;
 use librespot_core::config::SessionConfig;
 use librespot_core::session::Session;
 use librespot_playback::audio_backend;
-use librespot_playback::audio_backend::SinkBuilder;
+use librespot_playback::audio_backend::Sink;
+use librespot_playback::config::AudioFormat;
 use librespot_playback::config::Bitrate;
 use librespot_playback::config::PlayerConfig;
 use librespot_playback::mixer::MixerConfig;
@@ -34,6 +35,10 @@ use crate::traits::ListItem;
 /// One percent of the maximum supported [Player] volume, used when setting the volume to a certain
 /// percent.
 pub const VOLUME_PERCENT: u16 = ((u16::MAX as f64) * 1.0 / 100.0) as u16;
+
+/// Type of the function used to create the audio [Sink] for the [Player]. Unlike librespot's
+/// plain-fn `SinkBuilder`, a boxed closure can capture configuration like the PipeWire quantum.
+type BoxedSinkBuilder = Box<dyn Fn(Option<String>, AudioFormat) -> Box<dyn Sink> + Send + Sync>;
 
 /// Events sent by the [Player].
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -62,6 +67,8 @@ pub struct Spotify {
     since: Arc<RwLock<Option<SystemTime>>>,
     /// Channel to send commands to the worker thread.
     channel: Arc<RwLock<Option<mpsc::UnboundedSender<WorkerCommand>>>>,
+    /// Handle to the librespot session owned by the worker thread, e.g. for spclient requests.
+    session: Arc<RwLock<Option<Session>>>,
 }
 
 impl Spotify {
@@ -81,6 +88,7 @@ impl Spotify {
             elapsed: Arc::new(RwLock::new(None)),
             since: Arc::new(RwLock::new(None)),
             channel: Arc::new(RwLock::new(None)),
+            session: Arc::new(RwLock::new(None)),
         };
 
         let (user_tx, user_rx) = oneshot::channel();
@@ -115,7 +123,13 @@ impl Spotify {
             elapsed: Arc::new(RwLock::new(None)),
             since: Arc::new(RwLock::new(None)),
             channel: Arc::new(RwLock::new(None)),
+            session: Arc::new(RwLock::new(None)),
         }
+    }
+
+    /// A handle to the librespot [Session], if the worker is connected.
+    pub fn session(&self) -> Option<Session> {
+        self.session.read().unwrap().clone()
     }
 
     /// Start the worker thread. If `user_tx` is given, it will receive the username of the logged
@@ -131,10 +145,10 @@ impl Spotify {
         let events = self.events.clone();
         let volume = self.volume();
         let credentials = self.credentials.clone();
-        let backend_name = cfg.values().backend.clone();
-        let backend = Self::init_backend(backend_name)?;
+        let backend = Self::init_backend(&cfg)?;
         ASYNC_RUNTIME.get().unwrap().spawn(Self::worker(
             worker_channel,
+            self.session.clone(),
             events,
             rx,
             cfg,
@@ -206,7 +220,27 @@ impl Spotify {
     }
 
     /// Create and initialize the requested audio backend.
-    fn init_backend(desired_backend: Option<String>) -> Result<SinkBuilder, Box<dyn Error>> {
+    ///
+    /// The native PipeWire sink is preferred when available; librespot's built-in backends are
+    /// used when explicitly configured (or as fallback when the `pipewire_backend` feature is
+    /// disabled).
+    fn init_backend(cfg: &config::Config) -> Result<BoxedSinkBuilder, Box<dyn Error>> {
+        let desired_backend = cfg.values().backend.clone();
+
+        #[cfg(feature = "pipewire_backend")]
+        if matches!(desired_backend.as_deref(), None | Some("pipewire")) {
+            let quantum = cfg
+                .values()
+                .pipewire_quantum
+                .unwrap_or(crate::audio::pipewire_sink::DEFAULT_QUANTUM);
+            info!("Initializing audio backend pipewire (quantum {quantum})");
+            return Ok(Box::new(move |device, format| {
+                Box::new(crate::audio::pipewire_sink::PipeWireSink::new(
+                    device, format, quantum,
+                ))
+            }));
+        }
+
         let backend = if let Some(name) = desired_backend {
             audio_backend::BACKENDS
                 .iter()
@@ -232,20 +266,22 @@ impl Spotify {
             unsafe { env::set_var("PULSE_PROP_media.role", "music") };
         }
 
-        Ok(backend.1)
+        let builder = backend.1;
+        Ok(Box::new(move |device, format| builder(device, format)))
     }
 
     /// Create and run the worker thread.
     #[allow(clippy::too_many_arguments)]
     async fn worker(
         worker_channel: Arc<RwLock<Option<mpsc::UnboundedSender<WorkerCommand>>>>,
+        session_handle: Arc<RwLock<Option<Session>>>,
         events: EventManager,
         commands: mpsc::UnboundedReceiver<WorkerCommand>,
         cfg: Arc<config::Config>,
         credentials: Credentials,
         user_tx: Option<oneshot::Sender<String>>,
         volume: u16,
-        backend: SinkBuilder,
+        backend: BoxedSinkBuilder,
     ) {
         let bitrate_str = cfg.values().bitrate.unwrap_or(320).to_string();
         let bitrate = Bitrate::from_str(&bitrate_str);
@@ -264,6 +300,7 @@ impl Spotify {
         let session = Self::create_session(&cfg, credentials)
             .await
             .expect("Could not create session");
+        *session_handle.write().unwrap() = Some(session.clone());
         user_tx.map(|tx| tx.send(session.username()));
 
         let mixer_factory_opt = librespot_playback::mixer::find(Some(SoftMixer::NAME));
@@ -294,6 +331,7 @@ impl Spotify {
 
         error!("worker thread died, requesting restart");
         *worker_channel.write().unwrap() = None;
+        *session_handle.write().unwrap() = None;
         events.send(Event::SessionDied)
     }
 

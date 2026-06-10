@@ -68,14 +68,11 @@ impl Playable {
                     Self::Episode(episode) => Self::Episode(episode),
                     Self::Track(track) => Self::Track(track),
                 }) {
-                    if library.cfg.values().use_nerdfont.unwrap_or_default() {
-                        "\u{f012c}"
-                    } else {
-                        "✓"
-                    }
+                    library.cfg.icon(crate::config::IconKind::Saved)
                 } else {
-                    ""
-                },
+                    String::new()
+                }
+                .as_str(),
             )
             .replace("%duration", playable.duration_str().as_str())
     }

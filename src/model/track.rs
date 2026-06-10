@@ -222,13 +222,9 @@ impl ListItem for Track {
             Playable::format(&Playable::Track(self.clone()), &right, library)
         } else {
             let saved = if library.is_saved_track(&Playable::Track(self.clone())) {
-                if library.cfg.values().use_nerdfont.unwrap_or(false) {
-                    "\u{f012c}"
-                } else {
-                    "✓"
-                }
+                library.cfg.icon(config::IconKind::Saved)
             } else {
-                ""
+                String::new()
             };
             format!("{} {}", saved, self.duration_str())
         }

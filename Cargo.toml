@@ -57,12 +57,11 @@ librespot-oauth = "0.8.0"
 librespot-playback = {version = "0.8.0", default-features = false, features = ["native-tls"]}
 librespot-protocol = "0.8.0"
 log = "0.4.32"
-pancurses = {version = "0.17.0", optional = true}
 parse_duration = "2.1.1"
 platform-dirs = "0.3.0"
 rand = "0.10"
 regex = "1"
-reqwest = {version = "0.13", features = ["blocking", "json"]}
+reqwest = {version = "0.13", features = ["blocking", "json", "query"]}
 serde = "1.0"
 serde_cbor = "0.11.2"
 serde_json = "1.0"
@@ -74,6 +73,10 @@ tokio-stream = {version = "0.1.18", features = ["sync"]}
 toml = "1.1"
 unicode-width = "0.2.2"
 url = "2.5"
+pipewire = { version = "0.9.2", features = ["v0_3_77"], optional = true }
+rtrb = { version = "0.3", optional = true }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"], optional = true }
+icy_sixel = { version = "0.5.0", optional = true }
 
 [target.'cfg(unix)'.dependencies]
 signal-hook = "0.4.4"
@@ -95,20 +98,15 @@ features = ["z"]
 optional = true
 
 [features]
-alsa_backend = ["librespot-playback/alsa-backend"]
-cover = ["ioctl-rs"] # Support displaying the album cover
-default = ["share_clipboard", "pulseaudio_backend", "mpris", "notify", "crossterm_backend"]
+cover = ["ioctl-rs", "dep:image", "dep:icy_sixel"] # Support displaying the album cover
+default = ["share_clipboard", "pipewire_backend", "pulseaudio_backend", "mpris", "notify", "crossterm_backend", "cover"]
 mpris = ["zbus"] # Allow ncspot to be controlled via MPRIS API
-ncurses_backend = ["cursive/ncurses-backend"]
 notify = ["notify-rust"] # Show what's playing via a notification
 crossterm_backend = ["cursive/crossterm-backend"]
-pancurses_backend = ["cursive/pancurses-backend", "pancurses/win32"]
-portaudio_backend = ["librespot-playback/portaudio-backend"]
 pulseaudio_backend = ["librespot-playback/pulseaudio-backend"]
-rodio_backend = ["librespot-playback/rodio-backend"]
 share_clipboard = ["arboard", "arboard/wayland-data-control"] # Share a link to the system clipboard
 share_selection = ["arboard", "arboard/wayland-data-control"] # Use the primary selection for sharing - linux and bsd only
-termion_backend = ["cursive/termion-backend"]
+pipewire_backend = ["dep:pipewire", "dep:rtrb"] # Native low-latency PipeWire audio sink
 
 [package.metadata.deb]
 assets = [

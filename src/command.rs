@@ -113,6 +113,17 @@ impl fmt::Display for InsertSource {
     }
 }
 
+/// Direction for moving focus between panes in the pane layout.
+#[derive(Display, Clone, Copy, Serialize, Deserialize, Debug, PartialEq, Eq)]
+#[strum(serialize_all = "lowercase")]
+pub enum PaneDirection {
+    Left,
+    Right,
+    Up,
+    Down,
+    Next,
+}
+
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub enum Command {
     Quit,
@@ -132,6 +143,7 @@ pub enum Command {
     AddCurrent,
     Delete,
     Focus(String),
+    FocusPane(PaneDirection),
     Seek(SeekDirection),
     VolumeUp(u16),
     VolumeDown(u16),
@@ -164,6 +176,7 @@ impl fmt::Display for Command {
         let mut repr_tokens = vec![self.basename().to_owned()];
         let mut extras_args = match self {
             Self::Focus(tab) => vec![tab.to_owned()],
+            Self::FocusPane(direction) => vec![direction.to_string()],
             Self::Seek(direction) => vec![direction.to_string()],
             Self::VolumeUp(amount) => vec![amount.to_string()],
             Self::VolumeDown(amount) => vec![amount.to_string()],
@@ -248,6 +261,7 @@ impl Command {
             Self::AddCurrent => "add current",
             Self::Delete => "delete",
             Self::Focus(_) => "focus",
+            Self::FocusPane(_) => "focuspane",
             Self::Seek(_) => "seek",
             Self::VolumeUp(_) => "volup",
             Self::VolumeDown(_) => "voldown",
@@ -430,6 +444,33 @@ pub fn parse(input: &str) -> Result<Vec<Command>, CommandParseError> {
                     })?;
                     // TODO: this really should be strongly typed
                     Command::Focus(target.into())
+                }
+                "focuspane" => {
+                    let &direction = args.first().ok_or(E::InsufficientArgs {
+                        cmd: command.into(),
+                        hint: Some("left|right|up|down|next".into()),
+                    })?;
+                    let direction = match direction {
+                        "left" => PaneDirection::Left,
+                        "right" => PaneDirection::Right,
+                        "up" => PaneDirection::Up,
+                        "down" => PaneDirection::Down,
+                        "next" => PaneDirection::Next,
+                        arg => {
+                            return Err(E::BadEnumArg {
+                                arg: arg.into(),
+                                accept: vec![
+                                    "left".into(),
+                                    "right".into(),
+                                    "up".into(),
+                                    "down".into(),
+                                    "next".into(),
+                                ],
+                                optional: false,
+                            });
+                        }
+                    };
+                    Command::FocusPane(direction)
                 }
                 "seek" => {
                     if args.is_empty() {

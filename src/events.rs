@@ -1,6 +1,7 @@
 use crossbeam_channel::{Receiver, Sender, TryIter, unbounded};
 use cursive::{CbSink, Cursive};
 
+use crate::model::playable::Playable;
 use crate::queue::QueueEvent;
 use crate::spotify::PlayerEvent;
 
@@ -8,6 +9,9 @@ use crate::spotify::PlayerEvent;
 pub enum Event {
     Player(PlayerEvent),
     Queue(QueueEvent),
+    /// A new item was loaded into the player, e.g. by playing a track from the
+    /// queue or by restoring the last played track on startup.
+    TrackChanged(Box<Playable>),
     SessionDied,
     IpcInput(String),
 }
