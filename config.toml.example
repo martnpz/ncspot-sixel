@@ -66,6 +66,14 @@ pipewire_quantum = 1024
 #
 # The layout below is the built-in default.
 
+# Empty cells between the screen edge and between adjacent pane islands.
+# 0 = no gap (panes touch), 1 = default, 2+ = wider gutters.
+#gap = 1
+
+# Extra padding inside each island border on all sides (border is always 1 cell).
+# 0 = content touches the border (default), 1+ = breathing room inside.
+#padding = 0
+
 [[layout.columns]]
 width = 20
 panes = ["browser"]
@@ -77,6 +85,9 @@ panes = ["tracks"]
 [[layout.columns]]
 width = 40
 panes = ["info", "lyrics"]
+# Per-pane height as % of column height; last pane gets the remainder.
+# Must have the same number of entries as `panes`. Omit for even split.
+heights = [30, 70]
 
 [layout.browser]
 # Dropdown sections, in order.
@@ -99,6 +110,20 @@ filter_row = true
 # Number of artist genres shown below the cover. Note: Spotify has
 # deprecated artist genres, so this may be empty for some artists.
 genres = 2
+
+###############################################################################
+# Player bar
+###############################################################################
+# [statusbar]
+# # Rows for the progress bar. 1 = one thin line (default), 2-3 = taller bar.
+# height = 1
+# # Character style: "thin" (━/┉, default) or "thick" (▬/─).
+# style = "thin"
+# # Border decoration around the bar:
+# #   "none"    — no decoration (default)
+# #   "rounded" — full island border: ╭─────╮ / │ bar │ / │ info │ / ╰─────╯
+# #   "icon"    — │ end caps on the progress-bar rows only
+# border = "none"
 
 ###############################################################################
 # Lyrics

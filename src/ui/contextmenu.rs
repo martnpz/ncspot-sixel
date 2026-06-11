@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
 use cursive::Cursive;
+use cursive::theme::ColorStyle;
+use cursive::utils::markup::StyledString;
 use cursive::view::{Margins, ViewWrapper};
 use cursive::views::{Dialog, NamedView, ScrollView, SelectView};
 
@@ -49,6 +51,12 @@ enum ContextMenuAction {
     PlayNext(Box<dyn ListItem>),
     TogglePlayback,
     Queue(Box<dyn ListItem>),
+    Separator,
+}
+
+fn add_separator(content: &mut SelectView<ContextMenuAction>) {
+    let label = StyledString::styled("", ColorStyle::secondary());
+    content.add_item(label, ContextMenuAction::Separator);
 }
 
 impl ContextMenu {
@@ -223,39 +231,54 @@ impl ContextMenu {
             content.insert_item(2, "Queue", ContextMenuAction::Queue(item.as_listitem()));
         }
 
+        // Section: artist / album navigation
+        let mut nav_section = false;
         if let Some(artists) = item.artists() {
             let action = match artists.len() {
                 0 => None,
                 1 => Some(ContextMenuAction::SelectArtistAction(artists[0].clone())),
                 _ => Some(ContextMenuAction::SelectArtist(artists.clone())),
             };
-
             if let Some(a) = action {
+                if !nav_section {
+                    add_separator(&mut content);
+                    nav_section = true;
+                }
                 content.add_item(
                     format!("Artist{}", if artists.len() > 1 { "s" } else { "" }),
                     a,
-                )
+                );
             }
         }
-
         if let Some(ref a) = album {
+            if !nav_section {
+                add_separator(&mut content);
+            }
             content.add_item(
                 "Show album",
                 ContextMenuAction::ShowItem(Box::new(a.clone())),
             );
         }
 
+        // Section: share
         #[cfg(feature = "share_clipboard")]
         {
-            if let Some(url) = item.share_url() {
-                content.add_item("Share", ContextMenuAction::ShareUrl(url));
-            }
-            if let Some(url) = album.as_ref().and_then(|a| a.share_url()) {
-                content.add_item("Share album", ContextMenuAction::ShareUrl(url));
+            let share_url = item.share_url();
+            let share_album_url = album.as_ref().and_then(|a| a.share_url());
+            if share_url.is_some() || share_album_url.is_some() {
+                add_separator(&mut content);
+                if let Some(url) = share_url {
+                    content.add_item("Share", ContextMenuAction::ShareUrl(url));
+                }
+                if let Some(url) = share_album_url {
+                    content.add_item("Share album", ContextMenuAction::ShareUrl(url));
+                }
             }
         }
 
+        // Section: playlist / recommendations
         if let Some(t) = item.track() {
+            add_separator(&mut content);
             content.add_item(
                 "Add to playlist",
                 ContextMenuAction::AddToPlaylist(Box::new(t.clone())),
@@ -263,35 +286,37 @@ impl ContextMenu {
             content.add_item(
                 "Similar tracks",
                 ContextMenuAction::ShowRecommendations(Box::new(t)),
-            )
-        }
-        // If the item is saveable, its save state will be set
-        if let Some(savestatus) = item.is_saved(&library) {
-            content.add_item(
-                match savestatus {
-                    true => "Unsave",
-                    false => "Save",
-                },
-                ContextMenuAction::ToggleSavedStatus(item.as_listitem()),
             );
         }
 
-        if let Some(ref a) = album
-            && let Some(savestatus) = a.is_saved(&library)
-        {
-            content.add_item(
-                match savestatus {
-                    true => "Unsave album",
-                    false => "Save album",
-                },
-                ContextMenuAction::ToggleSavedStatus(a.as_listitem()),
-            );
+        // Section: save status
+        let track_saved = item.is_saved(&library);
+        let album_saved = album.as_ref().and_then(|a| a.is_saved(&library));
+        if track_saved.is_some() || album_saved.is_some() {
+            add_separator(&mut content);
+            if let Some(savestatus) = track_saved {
+                content.add_item(
+                    if savestatus { "Unsave" } else { "Save" },
+                    ContextMenuAction::ToggleSavedStatus(item.as_listitem()),
+                );
+            }
+            if let Some(ref a) = album
+                && let Some(savestatus) = album_saved
+            {
+                content.add_item(
+                    if savestatus { "Unsave album" } else { "Save album" },
+                    ContextMenuAction::ToggleSavedStatus(a.as_listitem()),
+                );
+            }
         }
 
         // open detail view of artist/album
         {
             let library = library.clone();
             content.set_on_submit(move |s: &mut Cursive, action: &ContextMenuAction| {
+                if matches!(action, ContextMenuAction::Separator) {
+                    return;
+                }
                 let queue = queue.clone();
                 let library = library.clone();
                 s.pop_layer();
@@ -332,6 +357,7 @@ impl ContextMenu {
                     ContextMenuAction::PlayNext(item) => item.as_listitem().play_next(&queue),
                     ContextMenuAction::TogglePlayback => queue.toggleplayback(),
                     ContextMenuAction::Queue(item) => item.as_listitem().queue(&queue),
+                    ContextMenuAction::Separator => unreachable!(),
                 }
             });
         }

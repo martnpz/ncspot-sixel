@@ -9,7 +9,7 @@ use cursive::Rect;
 use cursive::align::HAlign;
 use cursive::direction::Direction;
 use cursive::event::{Event, EventResult, MouseEvent};
-use cursive::theme::ColorStyle;
+use cursive::theme::{ColorStyle, Effect, Style};
 use cursive::view::{CannotFocus, Selector};
 use cursive::{Cursive, Printer, Vec2, View};
 use log::error;
@@ -72,6 +72,8 @@ impl ViewExt for PlaceholderPane {
 
 struct Column {
     width_pct: u8,
+    /// Per-pane height percentages. Empty = distribute evenly.
+    height_pcts: Vec<u8>,
     panes: Vec<Pane>,
 }
 
@@ -80,10 +82,71 @@ pub struct PaneLayoutView {
     /// (column, row) of the focused pane.
     focused: (usize, usize),
     last_size: Vec2,
+    /// Horizontal gap: between columns and at left/right screen edges.
+    gap_x: usize,
+    /// Vertical gap: between rows and at top/bottom screen edges.
+    gap_y: usize,
+    /// Horizontal padding: inside the border left/right.
+    padding_x: usize,
+    /// Vertical padding: inside the border top/bottom.
+    padding_y: usize,
 }
 
-/// Height of the per-pane title row.
-const TITLE_HEIGHT: usize = 1;
+/// Draw a rounded border box at `rect` with the title centred in the top edge.
+/// Focused islands get a brighter colour and bold title; unfocused are dimmed.
+fn draw_island(printer: &Printer, rect: Rect, title: &str, focused: bool) {
+    let w = rect.width();
+    let h = rect.height();
+    if w < 2 || h < 2 {
+        return;
+    }
+    let tl = rect.top_left();
+    let inner_w = w - 2;
+
+    // Truncate title so it fits with one space of padding on each side.
+    let max_title = inner_w.saturating_sub(2);
+    let mut title_display = title.to_string();
+    while title_display.width() > max_title && !title_display.is_empty() {
+        title_display.pop();
+    }
+    let title_padded = if title_display.is_empty() {
+        String::new()
+    } else {
+        format!(" {title_display} ")
+    };
+    let title_w = title_padded.width();
+    let left_fill = inner_w.saturating_sub(title_w) / 2;
+    let right_fill = inner_w.saturating_sub(title_w).saturating_sub(left_fill);
+
+    let border_style = if focused {
+        ColorStyle::title_primary()
+    } else {
+        ColorStyle::title_secondary()
+    };
+    let title_style = if focused {
+        Style::from(ColorStyle::title_primary()).combine(Effect::Bold)
+    } else {
+        Style::from(ColorStyle::title_secondary())
+    };
+
+    printer.with_color(border_style, |p| {
+        // Top edge: ╭───[back ]─ Title ─────╮
+        let dashes_l = "─".repeat(left_fill);
+        let dashes_r = "─".repeat(right_fill);
+        p.print(tl, &format!("╭{dashes_l}"));
+        p.with_style(title_style, |p| p.print(tl + (1 + left_fill, 0), &title_padded));
+        p.print(tl + (1 + left_fill + title_w, 0), &format!("{dashes_r}╮"));
+
+        // Bottom edge
+        p.print(tl + (0, h - 1), &format!("╰{}╯", "─".repeat(inner_w)));
+
+        // Side edges
+        for row in 1..h - 1 {
+            p.print(tl + (0, row), "│");
+            p.print(tl + (w - 1, row), "│");
+        }
+    });
+}
 
 /// Show `view` in the "tracks" pane when the pane screen is currently
 /// active, otherwise push it onto the fullscreen layout stack. Use this for
@@ -137,8 +200,17 @@ impl PaneLayoutView {
                 }
             }
             if !panes.is_empty() {
+                // Validate and store height percentages; discard if length
+                // doesn't match the number of successfully built panes.
+                let height_pcts = column_config
+                    .heights
+                    .as_deref()
+                    .filter(|h| h.len() == panes.len())
+                    .map(|h| h.to_vec())
+                    .unwrap_or_default();
                 columns.push(Column {
                     width_pct: column_config.width,
+                    height_pcts,
                     panes,
                 });
             }
@@ -148,6 +220,10 @@ impl PaneLayoutView {
             columns,
             focused: (0, 0),
             last_size: Vec2::zero(),
+            gap_x: config.gap_x.or(config.gap).unwrap_or(1) as usize,
+            gap_y: config.gap_y.or(config.gap).unwrap_or(1) as usize,
+            padding_x: config.padding_x.or(config.padding).unwrap_or(0) as usize,
+            padding_y: config.padding_y.or(config.padding).unwrap_or(0) as usize,
         }
     }
 
@@ -212,9 +288,10 @@ impl PaneLayoutView {
                     pane.top().on_leave();
                     pane.views.push(view);
                     let rect = pane.rect;
+                    let inset_x = 1 + self.padding_x;
+                    let inset_y = 1 + self.padding_y;
                     pane.top_mut()
-                        .layout(rect.size().saturating_sub((0, TITLE_HEIGHT)));
-                    // Move focus to the freshly populated pane.
+                        .layout(rect.size().saturating_sub((2 * inset_x, 2 * inset_y)));
                     self.focused = (column_index, pane_index);
                     return None;
                 }
@@ -225,6 +302,7 @@ impl PaneLayoutView {
 
     /// Pop the focused pane's stack. Returns whether something was popped.
     fn pop_focused(&mut self) -> bool {
+        let (inset_x, inset_y) = (1 + self.padding_x, 1 + self.padding_y);
         if let Some(pane) = self.focused_pane_mut()
             && pane.views.len() > 1
         {
@@ -232,7 +310,7 @@ impl PaneLayoutView {
             pane.views.pop();
             let rect = pane.rect;
             pane.top_mut()
-                .layout(rect.size().saturating_sub((0, TITLE_HEIGHT)));
+                .layout(rect.size().saturating_sub((2 * inset_x, 2 * inset_y)));
             return true;
         }
         false
@@ -257,27 +335,22 @@ impl View for PaneLayoutView {
                 let focused = (column_index, pane_index) == self.focused;
                 let rect = pane.rect;
 
-                // Pane title row, highlighted for the focused pane. With a
-                // stacked view, show a back marker.
+                // Island border with title in the top edge.
                 let title = if pane.views.len() > 1 {
                     format!("< {}", pane.top().title())
                 } else {
                     pane.top().title()
                 };
-                let style = if focused {
-                    ColorStyle::title_primary()
-                } else {
-                    ColorStyle::title_secondary()
-                };
-                printer.with_color(style, |printer| {
-                    printer.print_hline(rect.top_left(), rect.width(), " ");
-                    let offset = HAlign::Center.get_offset(title.width(), rect.width());
-                    printer.print(rect.top_left() + (offset, 0), &title);
-                });
+                draw_island(printer, rect, &title, focused);
 
+                // Content is inset by border (1) + padding on each side.
+                let inset_x = 1 + self.padding_x;
+                let inset_y = 1 + self.padding_y;
+                let content_w = rect.width().saturating_sub(2 * inset_x);
+                let content_h = rect.height().saturating_sub(2 * inset_y);
                 let content = &printer
-                    .offset(rect.top_left() + (0, TITLE_HEIGHT))
-                    .cropped((rect.width(), rect.height().saturating_sub(TITLE_HEIGHT)))
+                    .offset(rect.top_left() + (inset_x, inset_y))
+                    .cropped((content_w, content_h))
                     .focused(focused);
                 pane.top().draw(content);
             }
@@ -290,8 +363,6 @@ impl View for PaneLayoutView {
         let column_count = self.columns.len();
         let mut x = 0;
         for (column_index, column) in self.columns.iter_mut().enumerate() {
-            // Give the last column the remaining width to avoid gaps from
-            // percentage rounding.
             let width = if column_index + 1 == column_count {
                 size.x.saturating_sub(x)
             } else {
@@ -303,12 +374,23 @@ impl View for PaneLayoutView {
             for (pane_index, pane) in column.panes.iter_mut().enumerate() {
                 let height = if pane_index + 1 == pane_count {
                     size.y.saturating_sub(y)
+                } else if let Some(&pct) = column.height_pcts.get(pane_index) {
+                    size.y * pct as usize / 100
                 } else {
                     size.y / pane_count
                 };
-                pane.rect = Rect::from_size((x, y), (width, height));
+                // Island rect: inset by gap_x/gap_y so adjacent panes have
+                // a 2*gap separation and a gap outer margin.
+                let ix = x + self.gap_x;
+                let iy = y + self.gap_y;
+                let iw = width.saturating_sub(2 * self.gap_x);
+                let ih = height.saturating_sub(2 * self.gap_y);
+                pane.rect = Rect::from_size((ix, iy), (iw, ih));
+                // Content lives inside the border (1 cell) + per-axis padding.
+                let inset_x = 1 + self.padding_x;
+                let inset_y = 1 + self.padding_y;
                 pane.top_mut()
-                    .layout(Vec2::new(width, height.saturating_sub(TITLE_HEIGHT)));
+                    .layout(Vec2::new(iw.saturating_sub(2 * inset_x), ih.saturating_sub(2 * inset_y)));
                 y += height;
             }
             x += width;
@@ -348,7 +430,7 @@ impl View for PaneLayoutView {
 
                 return pane
                     .top_mut()
-                    .on_event(event.relativized(rect.top_left() + (0, TITLE_HEIGHT)));
+                    .on_event(event.relativized(rect.top_left() + (1 + self.padding_x, 1 + self.padding_y)));
             }
             return EventResult::Ignored;
         }

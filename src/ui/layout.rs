@@ -157,6 +157,19 @@ impl Layout {
         self.result_time = Some(SystemTime::now());
     }
 
+    fn statusbar_height(&self) -> usize {
+        let vals = self.configuration.values();
+        let cfg = vals.statusbar.as_ref();
+        let bar_rows = cfg.and_then(|s| s.height).unwrap_or(1) as usize;
+        let border_rows =
+            if cfg.and_then(|s| s.border.as_deref()).unwrap_or("none") == "rounded" {
+                2
+            } else {
+                0
+            };
+        bar_rows + 2 + border_rows
+    }
+
     pub fn clear_cmdline(&mut self) {
         self.cmdline.set_content("");
         self.cmdline_focus = false;
@@ -297,16 +310,25 @@ impl View for Layout {
                 printer.print((offset, 0), &view.title_sub());
             });
 
-            // screen content
+            let sb_height = self.statusbar_height();
+            // title (1) + island-to-bar gap (1) + statusbar (sb_height) + bottom gap (1)
             let printer = &printer
                 .offset((0, 1))
-                .cropped((printer.size.x, printer.size.y - 3 - cmdline_height))
+                .cropped((
+                    printer.size.x,
+                    printer.size.y.saturating_sub(3 + sb_height + cmdline_height),
+                ))
                 .focused(true);
             view.draw(printer);
         }
 
-        self.statusbar
-            .draw(&printer.offset((0, printer.size.y - 2 - cmdline_height)));
+        let sb_height = self.statusbar_height();
+        // Statusbar floats as an island: 1-cell margins left/right, 1-row gap at bottom.
+        self.statusbar.draw(
+            &printer
+                .offset((1, printer.size.y.saturating_sub(1 + sb_height + cmdline_height)))
+                .cropped((printer.size.x.saturating_sub(2), sb_height)),
+        );
 
         if let Ok(Some(r)) = result {
             printer.print_hline((0, printer.size.y - cmdline_height), printer.size.x, " ");
@@ -332,12 +354,14 @@ impl View for Layout {
     fn layout(&mut self, size: Vec2) {
         self.last_size = size;
 
-        self.statusbar.layout(Vec2::new(size.x, 2));
+        let sb_height = self.statusbar_height();
+        self.statusbar.layout(Vec2::new(size.x.saturating_sub(2), sb_height));
 
         self.cmdline.layout(Vec2::new(size.x, 1));
 
         if let Some(view) = self.get_current_view_mut() {
-            view.layout(Vec2::new(size.x, size.y.saturating_sub(3)));
+            // title (1) + island-to-bar gap (1) + statusbar (sb_height) + bottom gap (1)
+            view.layout(Vec2::new(size.x, size.y.saturating_sub(3 + sb_height)));
         }
     }
 
@@ -417,12 +441,18 @@ impl View for Layout {
                     cmdline_height += 1;
                 }
 
-                if position.y >= self.last_size.y.saturating_sub(2 + cmdline_height)
-                    && position.y < self.last_size.y - cmdline_height
+                let sb_height = self.statusbar_height();
+                // Statusbar occupies rows (size.y-1-sb)..(size.y-1), with 1-col
+                // left margin and 1-row bottom gap.
+                if position.y >= self.last_size.y.saturating_sub(1 + sb_height + cmdline_height)
+                    && position.y < self.last_size.y.saturating_sub(1 + cmdline_height)
+                    && position.x > 0
+                    && position.x < self.last_size.x.saturating_sub(1)
                 {
-                    self.statusbar.on_event(
-                        event.relativized(Vec2::new(0, self.last_size.y - 2 - cmdline_height)),
-                    );
+                    self.statusbar.on_event(event.relativized(Vec2::new(
+                        1,
+                        self.last_size.y.saturating_sub(1 + sb_height + cmdline_height),
+                    )));
                     return EventResult::consumed();
                 }
 

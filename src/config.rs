@@ -106,8 +106,21 @@ pub struct ConfigValues {
     pub hide_display_names: Option<bool>,
     pub ap_port: Option<u16>,
     pub layout: Option<LayoutConfig>,
+    pub statusbar: Option<StatusbarConfig>,
     pub icons: Option<IconsConfig>,
     pub lyrics: Option<LyricsConfig>,
+}
+
+/// Configuration for the bottom player bar, set in the `[statusbar]` table.
+#[derive(Clone, Serialize, Deserialize, Debug, Default)]
+pub struct StatusbarConfig {
+    /// Rows occupied by the progress bar. 1 = one line (default), 2-3 = taller.
+    pub height: Option<u8>,
+    /// Progress bar character style: `"thin"` (━/┉, default) or `"thick"` (█/░).
+    pub style: Option<String>,
+    /// Border decoration: `"none"` (default), `"rounded"` (╭╮ corners),
+    /// or `"icon"` (│ end caps on the bar rows only).
+    pub border: Option<String>,
 }
 
 /// Configuration of the lyrics view, set in the `[lyrics]` table.
@@ -184,6 +197,20 @@ pub struct LayoutConfig {
     pub tracks: Option<TracksPaneConfig>,
     /// Options for the "info" pane.
     pub info: Option<InfoConfig>,
+    /// Empty cells between the screen edge and between adjacent pane islands
+    /// (sets both x and y). Default 1. Overridden by `gap_x` / `gap_y`.
+    pub gap: Option<u8>,
+    /// Horizontal gap only (between columns and left/right screen edges).
+    pub gap_x: Option<u8>,
+    /// Vertical gap only (between rows and top/bottom screen edges).
+    pub gap_y: Option<u8>,
+    /// Extra padding inside each island border on every side. Default 0.
+    /// Overridden by `padding_x` / `padding_y`.
+    pub padding: Option<u8>,
+    /// Horizontal padding only (left/right inside the border).
+    pub padding_x: Option<u8>,
+    /// Vertical padding only (top/bottom inside the border).
+    pub padding_y: Option<u8>,
 }
 
 /// Options for the browser pane (`[layout.browser]`).
@@ -223,6 +250,10 @@ pub struct ColumnConfig {
     /// Panes stacked vertically in this column, top to bottom. Valid names:
     /// playlists, tracks, cover, lyrics, queue.
     pub panes: Vec<String>,
+    /// Height of each pane as a percentage of the column height. Must match
+    /// the length of `panes`; values need not sum to 100 (the last pane gets
+    /// the remainder). Omit to distribute evenly.
+    pub heights: Option<Vec<u8>>,
 }
 
 impl Default for LayoutConfig {
@@ -232,19 +263,28 @@ impl Default for LayoutConfig {
                 ColumnConfig {
                     width: 20,
                     panes: vec!["browser".into()],
+                    heights: None,
                 },
                 ColumnConfig {
                     width: 40,
                     panes: vec!["tracks".into()],
+                    heights: None,
                 },
                 ColumnConfig {
                     width: 40,
                     panes: vec!["info".into(), "lyrics".into()],
+                    heights: Some(vec![30, 70]),
                 },
             ],
             browser: None,
             tracks: None,
             info: None,
+            gap: None,
+            gap_x: None,
+            gap_y: None,
+            padding: None,
+            padding_x: None,
+            padding_y: None,
         }
     }
 }

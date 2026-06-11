@@ -472,6 +472,28 @@ impl View for TrackListView {
                         }
                         EventResult::consumed()
                     }
+                    MouseEvent::Press(MouseButton::Right) => {
+                        let header = usize::from(self.filter_row_enabled());
+                        if local.y < header {
+                            return EventResult::consumed();
+                        }
+                        let slot = (local.y - header) / self.row_height();
+                        let index = self.scroll_top + slot;
+                        if index < self.filtered.len() {
+                            self.selected = index;
+                            self.clamp_scroll();
+                            if let Some(item) = self.selected_item() {
+                                let queue = self.queue.clone();
+                                let library = self.library.clone();
+                                return EventResult::with_cb_once(move |s| {
+                                    let menu =
+                                        ContextMenu::new(&*item.as_listitem(), queue, library);
+                                    s.add_layer(menu);
+                                });
+                            }
+                        }
+                        EventResult::consumed()
+                    }
                     _ => EventResult::Ignored,
                 }
             }
