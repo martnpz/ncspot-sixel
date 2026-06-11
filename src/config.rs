@@ -234,6 +234,12 @@ pub struct TracksPaneConfig {
     pub thumbnails: Option<bool>,
     /// Show the persistent filter input row. Default true.
     pub filter_row: Option<bool>,
+    /// Default sort order applied when opening a playlist or album.
+    /// Values: `"last_added"`, `"first_added"`, `"duration"`,
+    /// `"alphabetical"`, `"reverse"` (reverse alphabetical).
+    /// Omit to keep Spotify's original order. A manual `sort` command
+    /// overrides this and is remembered per playlist.
+    pub default_sort: Option<String>,
 }
 
 /// Options for the info pane (`[layout.info]`).

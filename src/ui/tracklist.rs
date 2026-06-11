@@ -69,6 +69,18 @@ pub struct TrackListView {
     slots: RwLock<Vec<SlotState>>,
 }
 
+fn parse_default_sort(s: &str) -> Option<(crate::command::SortKey, crate::command::SortDirection)> {
+    use crate::command::{SortDirection, SortKey};
+    match s {
+        "last_added"   => Some((SortKey::Added,    SortDirection::Descending)),
+        "first_added"  => Some((SortKey::Added,    SortDirection::Ascending)),
+        "duration"     => Some((SortKey::Duration, SortDirection::Ascending)),
+        "alphabetical" => Some((SortKey::Title,    SortDirection::Ascending)),
+        "reverse"      => Some((SortKey::Title,    SortDirection::Descending)),
+        _ => None,
+    }
+}
+
 impl TrackListView {
     pub fn new(
         content: Arc<RwLock<Vec<Playable>>>,
@@ -105,12 +117,16 @@ impl TrackListView {
     }
 
     /// Persist `sort` commands for this list under the given id (and apply a
-    /// previously saved order now).
+    /// previously saved order now, or the configured default if none saved).
     pub fn with_sort_context(mut self, id: &str) -> Self {
         self.sort_context = Some(id.to_string());
         let saved = self.cfg.state().playlist_orders.get(id).cloned();
         if let Some(order) = saved {
             sort_playables(&mut self.content.write().unwrap(), &order.key, &order.direction);
+        } else if let Some(s) = self.tracks_config(|t| t.default_sort.clone()) {
+            if let Some((key, dir)) = parse_default_sort(&s) {
+                sort_playables(&mut self.content.write().unwrap(), &key, &dir);
+            }
         }
         self
     }

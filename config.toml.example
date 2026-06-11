@@ -105,6 +105,10 @@ row_height = 2
 thumbnails = true
 # Persistent filter input at the top of the track list (activate with /).
 filter_row = true
+# Default sort order when opening a playlist or album.
+# A manual "sort" command overrides this and is remembered per playlist.
+# Values: "last_added", "first_added", "duration", "alphabetical", "reverse"
+#default_sort = "last_added"
 
 [layout.info]
 # Number of artist genres shown below the cover. Note: Spotify has
