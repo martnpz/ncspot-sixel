@@ -14,7 +14,6 @@ use log::{error, info};
 use crate::command::{Command, GotoMode};
 use crate::commands::CommandResult;
 use crate::config::Config;
-use crate::events::EventManager;
 use crate::library::Library;
 use crate::queue::Queue;
 use crate::traits::{IntoBoxedViewExt, ListItem, ViewExt};
@@ -29,6 +28,31 @@ static SIXEL_SUPPORT: OnceLock<bool> = OnceLock::new();
 /// before `create_cursive()`.
 pub fn detect_terminal_capabilities() {
     let _ = SIXEL_SUPPORT.set(sixel::probe_support());
+}
+
+/// Whether the terminal reported sixel support (false before probing).
+pub fn sixel_supported() -> bool {
+    SIXEL_SUPPORT.get().copied().unwrap_or(false)
+}
+
+/// The size of a terminal cell in pixels (queried via TIOCGWINSZ), scaled
+/// down by `scale`. Falls back to a common cell size when the terminal
+/// doesn't report dimensions.
+pub fn cell_size_px(scale: f32) -> Vec2 {
+    let (rows, cols, mut xpixels, mut ypixels) = unsafe {
+        let mut query: (u16, u16, u16, u16) = (0, 0, 0, 0);
+        ioctl(1, TIOCGWINSZ, &mut query);
+        query
+    };
+
+    xpixels = ((xpixels as f32) / scale) as u16;
+    ypixels = ((ypixels as f32) / scale) as u16;
+
+    if cols > 0 && rows > 0 && xpixels > 0 && ypixels > 0 {
+        Vec2::new((xpixels / cols) as usize, (ypixels / rows) as usize)
+    } else {
+        Vec2::new(8, 16)
+    }
 }
 
 /// A renderer that can put a cover image onto the terminal.
@@ -65,11 +89,11 @@ impl CoverView {
         queue: Arc<Queue>,
         library: Arc<Library>,
         config: &Config,
-        events: EventManager,
+        images: Arc<sixel::SixelImageCache>,
     ) -> Self {
         let configured = config.values().cover_backend.clone();
         let backend: Box<dyn CoverBackend> = match configured.as_deref() {
-            Some("sixel") => Box::new(sixel::SixelBackend::new(events)),
+            Some("sixel") => Box::new(sixel::SixelBackend::new(images)),
             Some("ueberzug") => Box::new(ueberzug::UeberzugBackend::new()),
             Some(other) => {
                 error!(r#"unknown cover_backend "{other}", falling back to ueberzug"#);
@@ -78,7 +102,7 @@ impl CoverView {
             None => {
                 if SIXEL_SUPPORT.get().copied().unwrap_or(false) {
                     info!("using sixel cover backend");
-                    Box::new(sixel::SixelBackend::new(events))
+                    Box::new(sixel::SixelBackend::new(images))
                 } else {
                     info!("terminal doesn't support sixel, using ueberzug cover backend");
                     Box::new(ueberzug::UeberzugBackend::new())
@@ -100,22 +124,7 @@ impl CoverView {
     /// The size of a terminal cell in pixels, scaled by `cover_max_scale`.
     /// Queried per draw so it stays correct across window resizes.
     fn font_size(&self) -> Vec2 {
-        let (rows, cols, mut xpixels, mut ypixels) = unsafe {
-            let mut query: (u16, u16, u16, u16) = (0, 0, 0, 0);
-            ioctl(1, TIOCGWINSZ, &mut query);
-            query
-        };
-
-        xpixels = ((xpixels as f32) / self.scale) as u16;
-        ypixels = ((ypixels as f32) / self.scale) as u16;
-
-        // Fall back to a common cell size when the terminal doesn't report
-        // dimensions (e.g. when not running on a real pty).
-        if cols > 0 && rows > 0 && xpixels > 0 && ypixels > 0 {
-            Vec2::new((xpixels / cols) as usize, (ypixels / rows) as usize)
-        } else {
-            Vec2::new(8, 16)
-        }
+        cell_size_px(self.scale)
     }
 
     fn draw_cover(&self, url: String, draw_offset: Vec2, draw_size: Vec2) {

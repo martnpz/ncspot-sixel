@@ -1,6 +1,6 @@
 use std::collections::HashSet;
+use std::iter::Iterator;
 use std::sync::{Arc, RwLock};
-use std::{cmp::Ordering, iter::Iterator};
 
 use rand::{rng, seq::IteratorRandom};
 
@@ -13,7 +13,7 @@ use crate::model::track::Track;
 use crate::queue::Queue;
 use crate::spotify::Spotify;
 use crate::traits::{IntoBoxedViewExt, ListItem, ViewExt};
-use crate::ui::{listview::ListView, playlist::PlaylistView};
+use crate::ui::{listview::ListView, tracklist::TrackListView};
 use crate::{command::SortDirection, command::SortKey, library::Library};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -100,51 +100,8 @@ impl Playlist {
     }
 
     pub fn sort(&mut self, key: &SortKey, direction: &SortDirection) {
-        fn compare_artists(a: &[String], b: &[String]) -> Ordering {
-            let sanitize_artists_name = |x: &[String]| -> Vec<String> {
-                x.iter()
-                    .map(|x| {
-                        x.to_lowercase()
-                            .split(' ')
-                            .skip_while(|x| x == &"the")
-                            .collect()
-                    })
-                    .collect()
-            };
-
-            let a = sanitize_artists_name(a);
-            let b = sanitize_artists_name(b);
-
-            a.cmp(&b)
-        }
-
-        fn compare_album(a: &Track, b: &Track) -> Ordering {
-            a.album
-                .as_ref()
-                .map(|x| x.to_lowercase())
-                .cmp(&b.album.as_ref().map(|x| x.to_lowercase()))
-                .then_with(|| a.disc_number.cmp(&b.disc_number))
-                .then_with(|| a.track_number.cmp(&b.track_number))
-        }
-
         if let Some(c) = self.tracks.as_mut() {
-            c.sort_by(|a, b| match (a.track(), b.track()) {
-                (Some(a), Some(b)) => {
-                    let (a, b) = match *direction {
-                        SortDirection::Ascending => (a, b),
-                        SortDirection::Descending => (b, a),
-                    };
-                    match *key {
-                        SortKey::Title => a.title.to_lowercase().cmp(&b.title.to_lowercase()),
-                        SortKey::Duration => a.duration.cmp(&b.duration),
-                        SortKey::Album => compare_album(&a, &b),
-                        SortKey::Added => a.added_at.cmp(&b.added_at),
-                        SortKey::Artist => compare_artists(&a.artists, &b.artists)
-                            .then_with(|| compare_album(&a, &b)),
-                    }
-                }
-                _ => std::cmp::Ordering::Equal,
-            })
+            crate::model::playable::sort_playables(c, key, direction);
         }
     }
 }
@@ -275,7 +232,23 @@ impl ListItem for Playlist {
     }
 
     fn open(&self, queue: Arc<Queue>, library: Arc<Library>) -> Option<Box<dyn ViewExt>> {
-        Some(PlaylistView::new(queue, library, self).into_boxed_view_ext())
+        let mut playlist = self.clone();
+        playlist.load_tracks(&queue.get_spotify());
+        let tracks = playlist.tracks.unwrap_or_default();
+        let cfg = library.cfg.clone();
+        Some(
+            TrackListView::new(
+                Arc::new(RwLock::new(tracks)),
+                queue,
+                library,
+                cfg,
+                #[cfg(feature = "cover")]
+                crate::ui::cover::sixel::shared(),
+            )
+            .with_title(&self.name)
+            .with_sort_context(&self.id)
+            .into_boxed_view_ext(),
+        )
     }
 
     fn open_recommendations(

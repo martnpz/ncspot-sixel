@@ -288,13 +288,13 @@ Possible configuration values are:
 
 The `panes` screen shows several views side by side. Columns are defined left
 to right with a width in percent; each column stacks one or more panes
-vertically. Valid pane names are `playlists`, `tracks`, `cover`, `lyrics` and
-`queue`. The default is:
+vertically. Valid pane names are `browser`, `tracks`, `info`, `cover`,
+`lyrics`, `playlists` and `queue`. The default is:
 
 ```toml
 [[layout.columns]]
 width = 20
-panes = ["playlists"]
+panes = ["browser"]
 
 [[layout.columns]]
 width = 40
@@ -302,19 +302,48 @@ panes = ["tracks"]
 
 [[layout.columns]]
 width = 40
-panes = ["cover", "lyrics"]
+panes = ["info", "lyrics"]
 ```
 
 Move focus between panes with `Tab` (next) or `Alt+h/j/k/l`, or remap the
-`focuspane left|right|up|down|next` command. Opening a playlist from the
-playlists pane shows its tracks in the `tracks` pane.
+`focuspane left|right|up|down|next` command.
+
+**browser** — its pane title is a dropdown menu: click it (or press `Shift+O`
+with the pane focused) to switch between Search, Playlists, Albums, Artists
+and Recommendations. `o` opens the selected item in the tracks pane; `Enter`
+plays it. The Search section has an input row on top (`/` focuses it, `Enter`
+searches) with results grouped into tabs below. Recommendations are seeded
+from random saved tracks. Configure with:
+
+```toml
+[layout.browser]
+sections = ["search", "playlists", "albums", "artists", "recommendations"]
+default_section = "playlists"
+sort = "default"   # or "name"
+```
+
+**tracks** — playlists/albums/artist pages opened anywhere stack inside this
+pane; `Backspace` goes back. Track rows show an album-art thumbnail (sixel
+terminals only), title and artist — album. `/` activates the live filter row,
+`sort <key> [asc|desc]` sorts (persisted per playlist). Configure with:
+
+```toml
+[layout.tracks]
+row_height = 2     # cells per row; 1 = text-only
+thumbnails = true
+filter_row = true
+```
+
+**info** — always shows the *playing* track: cover image with title, artist
+and genres below (`[layout.info] genres = 2`; Spotify has deprecated artist
+genres, so they may be empty for some artists).
 
 ### Icons
 
 Individual icons can be overridden in the `[icons]` table; unset icons use
 nerd-font defaults when `use_nerdfont` is enabled and ASCII defaults
 otherwise. Available keys: `playing`, `paused`, `stopped`, `repeat`,
-`repeat_track`, `shuffle`, `saved`, `updating`.
+`repeat_track`, `shuffle`, `saved`, `updating`, `lyrics_current`.
 
 ```toml
 [icons]
@@ -327,8 +356,17 @@ saved = "♥"
 The `lyrics` screen (default keybinding `F9`) shows synced lyrics for the
 playing track, fetched from [lrclib.net](https://lrclib.net) with Spotify's
 lyrics API as fallback and cached on disk. The currently sung line is
-highlighted and kept centered; scrolling manually disables following until
-`Back` is pressed or `move playing` is invoked.
+highlighted, marked with the `lyrics_current` icon in the left gutter and
+kept vertically centered — past the end of the text it simply keeps
+scrolling up. Upcoming lines are dimmed. Scrolling manually (movement keys
+or mouse wheel) disables following until `Back` is pressed or `move playing`
+is invoked.
+
+```toml
+[lyrics]
+# Horizontal text position: "left", "center" or "right".
+align = "center"
+```
 
 ### Custom Keybindings
 Keybindings can be configured in `[keybindings]` section in `config.toml`.

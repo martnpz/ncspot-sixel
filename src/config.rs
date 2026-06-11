@@ -107,6 +107,23 @@ pub struct ConfigValues {
     pub ap_port: Option<u16>,
     pub layout: Option<LayoutConfig>,
     pub icons: Option<IconsConfig>,
+    pub lyrics: Option<LyricsConfig>,
+}
+
+/// Configuration of the lyrics view, set in the `[lyrics]` table.
+#[derive(Clone, Serialize, Deserialize, Debug, Default)]
+pub struct LyricsConfig {
+    /// Horizontal position of the lyrics text.
+    pub align: Option<LyricsAlign>,
+}
+
+#[derive(Clone, Copy, Serialize, Deserialize, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum LyricsAlign {
+    Left,
+    #[default]
+    Center,
+    Right,
 }
 
 /// User overrides for the icons used across the UI, set in the `[icons]`
@@ -122,6 +139,7 @@ pub struct IconsConfig {
     pub shuffle: Option<String>,
     pub saved: Option<String>,
     pub updating: Option<String>,
+    pub lyrics_current: Option<String>,
 }
 
 /// The icons that can be customized through [IconsConfig].
@@ -135,6 +153,8 @@ pub enum IconKind {
     Shuffle,
     Saved,
     Updating,
+    /// Marker shown next to the currently sung lyrics line.
+    LyricsCurrent,
 }
 
 impl IconKind {
@@ -149,6 +169,7 @@ impl IconKind {
             Self::Shuffle => ("\u{f049d} ", "[Z] "),
             Self::Saved => ("\u{f012c}", "✓"),
             Self::Updating => ("\u{f04e6} ", "[U] "),
+            Self::LyricsCurrent => ("\u{f075a} ", "♪ "),
         }
     }
 }
@@ -157,6 +178,42 @@ impl IconKind {
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct LayoutConfig {
     pub columns: Vec<ColumnConfig>,
+    /// Options for the "browser" pane.
+    pub browser: Option<BrowserConfig>,
+    /// Options for the "tracks" pane.
+    pub tracks: Option<TracksPaneConfig>,
+    /// Options for the "info" pane.
+    pub info: Option<InfoConfig>,
+}
+
+/// Options for the browser pane (`[layout.browser]`).
+#[derive(Clone, Serialize, Deserialize, Debug, Default)]
+pub struct BrowserConfig {
+    /// Sections shown in the dropdown, in order. Valid: "search",
+    /// "playlists", "albums", "artists", "recommendations".
+    pub sections: Option<Vec<String>>,
+    /// Section selected at startup.
+    pub default_section: Option<String>,
+    /// Sorting of section lists: "default" (Spotify order) or "name".
+    pub sort: Option<String>,
+}
+
+/// Options for the tracks pane (`[layout.tracks]`).
+#[derive(Clone, Serialize, Deserialize, Debug, Default)]
+pub struct TracksPaneConfig {
+    /// Height of a track row in cells; 1 disables thumbnails. Default 2.
+    pub row_height: Option<u8>,
+    /// Show album-art thumbnails (requires sixel). Default true.
+    pub thumbnails: Option<bool>,
+    /// Show the persistent filter input row. Default true.
+    pub filter_row: Option<bool>,
+}
+
+/// Options for the info pane (`[layout.info]`).
+#[derive(Clone, Serialize, Deserialize, Debug, Default)]
+pub struct InfoConfig {
+    /// Number of artist genres displayed. Default 2.
+    pub genres: Option<u8>,
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
@@ -174,7 +231,7 @@ impl Default for LayoutConfig {
             columns: vec![
                 ColumnConfig {
                     width: 20,
-                    panes: vec!["playlists".into()],
+                    panes: vec!["browser".into()],
                 },
                 ColumnConfig {
                     width: 40,
@@ -182,9 +239,12 @@ impl Default for LayoutConfig {
                 },
                 ColumnConfig {
                     width: 40,
-                    panes: vec!["cover".into(), "lyrics".into()],
+                    panes: vec!["info".into(), "lyrics".into()],
                 },
             ],
+            browser: None,
+            tracks: None,
+            info: None,
         }
     }
 }
@@ -345,6 +405,7 @@ impl Config {
                 IconKind::Shuffle => &icons.shuffle,
                 IconKind::Saved => &icons.saved,
                 IconKind::Updating => &icons.updating,
+                IconKind::LyricsCurrent => &icons.lyrics_current,
             }
             .clone()
         });
@@ -489,6 +550,26 @@ pub fn set_configuration_base_path(base_path: Option<PathBuf>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn example_config_parses() {
+        let example = include_str!("../config.toml.example");
+        let values: ConfigValues =
+            toml::from_str(example).expect("config.toml.example must parse into ConfigValues");
+
+        let layout = values.layout.expect("example should define [layout]");
+        assert_eq!(layout.columns.len(), 3);
+        assert_eq!(layout.columns[0].panes, vec!["browser"]);
+        assert_eq!(layout.columns[2].panes, vec!["info", "lyrics"]);
+        let browser = layout.browser.expect("example should define [layout.browser]");
+        assert_eq!(browser.default_section.as_deref(), Some("playlists"));
+        assert_eq!(browser.sections.map(|s| s.len()), Some(5));
+        let tracks = layout.tracks.expect("example should define [layout.tracks]");
+        assert_eq!(tracks.row_height, Some(2));
+        assert_eq!(layout.info.and_then(|i| i.genres), Some(2));
+        assert_eq!(values.pipewire_quantum, Some(1024));
+        assert_eq!(values.initial_screen.as_deref(), Some("panes"));
+    }
 
     #[test]
     fn icon_resolution_precedence() {

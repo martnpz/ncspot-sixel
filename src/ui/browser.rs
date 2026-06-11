@@ -1,0 +1,472 @@
+//! Left "browser" pane: its title is a dropdown menu that switches between
+//! sections (Search, Playlists, Albums, Artists, Recommendations). Items
+//! opened here load into the "tracks" pane via the pane layout's view
+//! interception.
+
+use std::sync::{Arc, RwLock};
+
+use cursive::event::{Event, EventResult, Key, MouseButton, MouseEvent};
+use cursive::theme::ColorStyle;
+use cursive::view::Position;
+use cursive::views::{Layer, OnEventView, SelectView};
+use cursive::{Cursive, Printer, Vec2, View};
+use log::error;
+
+use crate::command::{Command, TargetMode};
+use crate::commands::CommandResult;
+use crate::config::Config;
+use crate::events::EventManager;
+use crate::library::Library;
+use crate::model::playable::Playable;
+use crate::queue::Queue;
+use crate::traits::{ListItem, ViewExt};
+use crate::ui::listview::ListView;
+use crate::ui::search_results::SearchResultsView;
+use crate::ui::tracklist::TrackListView;
+
+#[cfg(feature = "cover")]
+use crate::ui::cover::sixel::SixelImageCache;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BrowserSection {
+    Search,
+    Playlists,
+    Albums,
+    Artists,
+    Recommendations,
+}
+
+impl BrowserSection {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Search => "Search",
+            Self::Playlists => "Playlists",
+            Self::Albums => "Albums",
+            Self::Artists => "Artists",
+            Self::Recommendations => "Recommendations",
+        }
+    }
+
+    fn parse(name: &str) -> Option<Self> {
+        match name {
+            "search" => Some(Self::Search),
+            "playlists" => Some(Self::Playlists),
+            "albums" => Some(Self::Albums),
+            "artists" => Some(Self::Artists),
+            "recommendations" => Some(Self::Recommendations),
+            _ => None,
+        }
+    }
+}
+
+const DEFAULT_SECTIONS: [BrowserSection; 5] = [
+    BrowserSection::Search,
+    BrowserSection::Playlists,
+    BrowserSection::Albums,
+    BrowserSection::Artists,
+    BrowserSection::Recommendations,
+];
+
+pub struct BrowserView {
+    queue: Arc<Queue>,
+    library: Arc<Library>,
+    events: EventManager,
+
+    section: BrowserSection,
+    sections: Vec<BrowserSection>,
+
+    playlists_content: Arc<RwLock<Vec<crate::model::playlist::Playlist>>>,
+    albums_content: Arc<RwLock<Vec<crate::model::album::Album>>>,
+    artists_content: Arc<RwLock<Vec<crate::model::artist::Artist>>>,
+    playlists: ListView<crate::model::playlist::Playlist>,
+    albums: ListView<crate::model::album::Album>,
+    artists: ListView<crate::model::artist::Artist>,
+
+    /// Recommendation tracks, fetched lazily on first visit.
+    recommendations: Arc<RwLock<Vec<Playable>>>,
+    recommendations_view: TrackListView,
+    recommendations_loaded: bool,
+
+    /// In-pane search: query input plus categorized results.
+    search_input: String,
+    search_input_active: bool,
+    search_results: Option<SearchResultsView>,
+
+    /// Absolute screen offset of the pane content, captured during draw and
+    /// used to anchor the dropdown menu.
+    last_offset: RwLock<Vec2>,
+}
+
+impl BrowserView {
+    pub fn new(
+        queue: Arc<Queue>,
+        library: Arc<Library>,
+        events: EventManager,
+        cfg: Arc<Config>,
+        #[cfg(feature = "cover")] images: Option<Arc<SixelImageCache>>,
+    ) -> Self {
+        let browser_cfg = cfg.values().layout.as_ref().and_then(|l| l.browser.clone());
+        let browser_cfg = browser_cfg.unwrap_or_default();
+
+        let sections: Vec<BrowserSection> = browser_cfg
+            .sections
+            .as_ref()
+            .map(|names| {
+                names
+                    .iter()
+                    .filter_map(|name| {
+                        let section = BrowserSection::parse(name);
+                        if section.is_none() {
+                            error!(r#"unknown browser section "{name}", skipping"#);
+                        }
+                        section
+                    })
+                    .collect()
+            })
+            .filter(|sections: &Vec<_>| !sections.is_empty())
+            .unwrap_or_else(|| DEFAULT_SECTIONS.to_vec());
+
+        let section = browser_cfg
+            .default_section
+            .as_deref()
+            .and_then(BrowserSection::parse)
+            .filter(|section| sections.contains(section))
+            .unwrap_or_else(|| {
+                *sections
+                    .iter()
+                    .find(|s| **s != BrowserSection::Search)
+                    .unwrap_or(&sections[0])
+            });
+
+        // Section lists: live library collections, or sorted snapshots when
+        // sort = "name" is configured.
+        let sort_by_name = browser_cfg.sort.as_deref() == Some("name");
+        let playlists_content = if sort_by_name {
+            let mut copy = library.playlists.read().unwrap().clone();
+            copy.sort_by_key(|p| p.name.to_lowercase());
+            Arc::new(RwLock::new(copy))
+        } else {
+            library.playlists.clone()
+        };
+        let albums_content = if sort_by_name {
+            let mut copy = library.albums.read().unwrap().clone();
+            copy.sort_by_key(|a| a.title.to_lowercase());
+            Arc::new(RwLock::new(copy))
+        } else {
+            library.albums.clone()
+        };
+        let artists_content = if sort_by_name {
+            let mut copy = library.artists.read().unwrap().clone();
+            copy.sort_by_key(|a| a.name.to_lowercase());
+            Arc::new(RwLock::new(copy))
+        } else {
+            library.artists.clone()
+        };
+
+        let recommendations: Arc<RwLock<Vec<Playable>>> = Arc::new(RwLock::new(Vec::new()));
+        let recommendations_view = TrackListView::new(
+            recommendations.clone(),
+            queue.clone(),
+            library.clone(),
+            cfg.clone(),
+            #[cfg(feature = "cover")]
+            images.clone(),
+        )
+        .with_title("Recommendations");
+
+        Self {
+            playlists: ListView::new(playlists_content.clone(), queue.clone(), library.clone()),
+            albums: ListView::new(albums_content.clone(), queue.clone(), library.clone()),
+            artists: ListView::new(artists_content.clone(), queue.clone(), library.clone()),
+            playlists_content,
+            albums_content,
+            artists_content,
+            recommendations,
+            recommendations_view,
+            recommendations_loaded: false,
+            search_input: String::new(),
+            search_input_active: false,
+            search_results: None,
+            last_offset: RwLock::new(Vec2::zero()),
+            section,
+            sections: sections.clone(),
+            queue,
+            library,
+            events,
+        }
+    }
+
+    pub fn set_section(&mut self, section: BrowserSection) {
+        self.section = section;
+        if section == BrowserSection::Search {
+            self.search_input_active = true;
+        }
+        if section == BrowserSection::Recommendations && !self.recommendations_loaded {
+            self.recommendations_loaded = true;
+            self.load_recommendations();
+        }
+        self.events.trigger();
+    }
+
+    /// Fetch recommendations seeded by random saved tracks, off-thread.
+    fn load_recommendations(&self) {
+        let library = self.library.clone();
+        let spotify = self.queue.get_spotify();
+        let content = self.recommendations.clone();
+        let events = self.events.clone();
+        std::thread::spawn(move || {
+            use rand::seq::IteratorRandom;
+            let seed_ids: Vec<String> = {
+                let tracks = library.tracks.read().unwrap();
+                let mut rng = rand::rng();
+                tracks
+                    .iter()
+                    .filter_map(|t| t.id.clone())
+                    .sample(&mut rng, 5)
+            };
+            if seed_ids.is_empty() {
+                return;
+            }
+            let seeds: Vec<&str> = seed_ids.iter().map(String::as_str).collect();
+            match spotify.api.recommendations(None, None, Some(seeds)) {
+                Ok(recommendations) => {
+                    let tracks: Vec<Playable> = recommendations
+                        .tracks
+                        .iter()
+                        .map(|t| Playable::Track(crate::model::track::Track::from(t)))
+                        .collect();
+                    *content.write().unwrap() = tracks;
+                    events.trigger();
+                }
+                Err(()) => error!("failed to fetch recommendations"),
+            }
+        });
+    }
+
+    fn submit_search(&mut self) {
+        self.search_input_active = false;
+        if self.search_input.is_empty() {
+            return;
+        }
+        self.search_results = Some(SearchResultsView::new(
+            self.search_input.clone(),
+            self.events.clone(),
+            self.queue.clone(),
+            self.library.clone(),
+        ));
+    }
+
+    /// The list view of the active section.
+    fn section_view_mut(&mut self) -> &mut dyn ViewExt {
+        match self.section {
+            BrowserSection::Playlists => &mut self.playlists,
+            BrowserSection::Albums => &mut self.albums,
+            BrowserSection::Artists => &mut self.artists,
+            BrowserSection::Recommendations => &mut self.recommendations_view,
+            BrowserSection::Search => match &mut self.search_results {
+                Some(results) => results,
+                None => &mut self.playlists, // placeholder, drawn specially
+            },
+        }
+    }
+
+    /// Open the selected library item as a thumbnail track list (playlists
+    /// and albums) or detail view (artists).
+    fn open_selected(&mut self) -> Option<Box<dyn ViewExt>> {
+        match self.section {
+            BrowserSection::Playlists => {
+                let playlist = {
+                    let playlists = self.playlists_content.read().unwrap();
+                    playlists.get(self.playlists.get_selected_index()).cloned()
+                }?;
+                playlist.open(self.queue.clone(), self.library.clone())
+            }
+            BrowserSection::Albums => {
+                let album = {
+                    let albums = self.albums_content.read().unwrap();
+                    albums.get(self.albums.get_selected_index()).cloned()
+                }?;
+                album.open(self.queue.clone(), self.library.clone())
+            }
+            BrowserSection::Artists => {
+                let artist = {
+                    let artists = self.artists_content.read().unwrap();
+                    artists.get(self.artists.get_selected_index()).cloned()
+                }?;
+                artist.open(self.queue.clone(), self.library.clone())
+            }
+            _ => None,
+        }
+    }
+
+    fn open_dropdown(&self) -> EventResult {
+        // The dropdown opens right below the pane title, i.e. at the top of
+        // the pane content.
+        let anchor = *self.last_offset.read().unwrap();
+        let sections = self.sections.clone();
+
+        EventResult::with_cb(move |s: &mut Cursive| {
+            let mut select = SelectView::<BrowserSection>::new();
+            for section in &sections {
+                select.add_item(format!(" {} ", section.label()), *section);
+            }
+            select.set_on_submit(|s: &mut Cursive, section: &BrowserSection| {
+                let section = *section;
+                s.pop_layer();
+                s.call_on_name("browser", move |browser: &mut Self| {
+                    browser.set_section(section);
+                });
+            });
+
+            let menu = OnEventView::new(Layer::new(select))
+                .on_event(Key::Esc, |s| {
+                    s.pop_layer();
+                })
+                .on_event(cursive::event::Event::Char('q'), |s| {
+                    s.pop_layer();
+                });
+            s.screen_mut()
+                .add_layer_at(Position::absolute(anchor), menu);
+        })
+    }
+}
+
+impl View for BrowserView {
+    fn draw(&self, printer: &Printer) {
+        *self.last_offset.write().unwrap() = printer.offset;
+
+        match self.section {
+            BrowserSection::Playlists => self.playlists.draw(printer),
+            BrowserSection::Albums => self.albums.draw(printer),
+            BrowserSection::Artists => self.artists.draw(printer),
+            BrowserSection::Recommendations => self.recommendations_view.draw(printer),
+            BrowserSection::Search => {
+                // Input row on top, results below.
+                let style = if self.search_input_active {
+                    ColorStyle::highlight()
+                } else {
+                    ColorStyle::secondary()
+                };
+                printer.with_color(style, |printer| {
+                    printer.print_hline((0, 0), printer.size.x, " ");
+                    let text = if self.search_input.is_empty() && !self.search_input_active {
+                        "Search…".to_string()
+                    } else {
+                        format!(
+                            "{}{}",
+                            self.search_input,
+                            if self.search_input_active { "▏" } else { "" }
+                        )
+                    };
+                    printer.print((0, 0), &text);
+                });
+
+                if let Some(results) = &self.search_results {
+                    let printer = printer
+                        .offset((0, 1))
+                        .cropped((printer.size.x, printer.size.y.saturating_sub(1)));
+                    results.draw(&printer);
+                }
+            }
+        }
+    }
+
+    fn layout(&mut self, size: Vec2) {
+        match self.section {
+            BrowserSection::Playlists => self.playlists.layout(size),
+            BrowserSection::Albums => self.albums.layout(size),
+            BrowserSection::Artists => self.artists.layout(size),
+            BrowserSection::Recommendations => self.recommendations_view.layout(size),
+            BrowserSection::Search => {
+                if let Some(results) = &mut self.search_results {
+                    results.layout(Vec2::new(size.x, size.y.saturating_sub(1)));
+                }
+            }
+        }
+    }
+
+    fn needs_relayout(&self) -> bool {
+        true
+    }
+
+    fn on_event(&mut self, event: Event) -> EventResult {
+        if self.section == BrowserSection::Search {
+            if self.search_input_active {
+                match event {
+                    Event::Char(c) => {
+                        self.search_input.push(c);
+                        return EventResult::consumed();
+                    }
+                    Event::Key(Key::Backspace) => {
+                        self.search_input.pop();
+                        return EventResult::consumed();
+                    }
+                    Event::Key(Key::Enter) => {
+                        self.submit_search();
+                        return EventResult::consumed();
+                    }
+                    Event::Key(Key::Esc) => {
+                        self.search_input_active = false;
+                        return EventResult::consumed();
+                    }
+                    _ => return EventResult::Ignored,
+                }
+            }
+            match event {
+                Event::Char('/') => {
+                    self.search_input_active = true;
+                    return EventResult::consumed();
+                }
+                Event::Mouse {
+                    event: MouseEvent::Press(MouseButton::Left),
+                    position,
+                    offset,
+                } if position.saturating_sub(offset).y == 0 => {
+                    self.search_input_active = true;
+                    return EventResult::consumed();
+                }
+                Event::Mouse { .. } => {
+                    if let Some(results) = &mut self.search_results {
+                        return results.on_event(event.relativized((0, 1)));
+                    }
+                    return EventResult::Ignored;
+                }
+                _ => {}
+            }
+            if let Some(results) = &mut self.search_results {
+                return results.on_event(event);
+            }
+            return EventResult::Ignored;
+        }
+
+        self.section_view_mut().on_event(event)
+    }
+}
+
+impl ViewExt for BrowserView {
+    fn title(&self) -> String {
+        format!("{} ▾", self.section.label())
+    }
+
+    fn on_title_action(&mut self) -> EventResult {
+        self.open_dropdown()
+    }
+
+    fn on_command(&mut self, s: &mut Cursive, cmd: &Command) -> Result<CommandResult, String> {
+        // Shift+O opens the section dropdown from the keyboard.
+        if matches!(cmd, Command::Open(TargetMode::Current)) {
+            if let EventResult::Consumed(Some(callback)) = self.open_dropdown() {
+                callback(s);
+            }
+            return Ok(CommandResult::Consumed(None));
+        }
+
+        if matches!(cmd, Command::Open(TargetMode::Selected))
+            && let Some(view) = self.open_selected()
+        {
+            return Ok(CommandResult::View(view));
+        }
+
+        self.section_view_mut().on_command(s, cmd)
+    }
+}

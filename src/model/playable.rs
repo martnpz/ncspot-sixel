@@ -19,6 +19,63 @@ pub enum Playable {
     Episode(Episode),
 }
 
+/// Sort a list of playables in place. Non-track items keep their position
+/// relative to each other.
+pub fn sort_playables(
+    playables: &mut [Playable],
+    key: &crate::command::SortKey,
+    direction: &crate::command::SortDirection,
+) {
+    use crate::command::{SortDirection, SortKey};
+    use std::cmp::Ordering;
+
+    fn compare_artists(a: &[String], b: &[String]) -> Ordering {
+        let sanitize_artists_name = |x: &[String]| -> Vec<String> {
+            x.iter()
+                .map(|x| {
+                    x.to_lowercase()
+                        .split(' ')
+                        .skip_while(|x| x == &"the")
+                        .collect()
+                })
+                .collect()
+        };
+
+        let a = sanitize_artists_name(a);
+        let b = sanitize_artists_name(b);
+
+        a.cmp(&b)
+    }
+
+    fn compare_album(a: &Track, b: &Track) -> Ordering {
+        a.album
+            .as_ref()
+            .map(|x| x.to_lowercase())
+            .cmp(&b.album.as_ref().map(|x| x.to_lowercase()))
+            .then_with(|| a.disc_number.cmp(&b.disc_number))
+            .then_with(|| a.track_number.cmp(&b.track_number))
+    }
+
+    playables.sort_by(|a, b| match (a.track(), b.track()) {
+        (Some(a), Some(b)) => {
+            let (a, b) = match *direction {
+                SortDirection::Ascending => (a, b),
+                SortDirection::Descending => (b, a),
+            };
+            match *key {
+                SortKey::Title => a.title.to_lowercase().cmp(&b.title.to_lowercase()),
+                SortKey::Duration => a.duration.cmp(&b.duration),
+                SortKey::Album => compare_album(&a, &b),
+                SortKey::Added => a.added_at.cmp(&b.added_at),
+                SortKey::Artist => {
+                    compare_artists(&a.artists, &b.artists).then_with(|| compare_album(&a, &b))
+                }
+            }
+        }
+        _ => Ordering::Equal,
+    })
+}
+
 impl Playable {
     pub fn format(playable: &Self, formatting: &str, library: &Library) -> String {
         formatting

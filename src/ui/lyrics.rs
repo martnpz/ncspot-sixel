@@ -1,11 +1,13 @@
 use std::sync::{Arc, RwLock};
 
+use cursive::event::{Event, EventResult, MouseEvent};
 use cursive::theme::{ColorStyle, ColorType, Effect, PaletteColor, Style};
 use cursive::{Cursive, Printer, Vec2, View};
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::command::{Command, MoveAmount, MoveMode};
 use crate::commands::CommandResult;
+use crate::config::{Config, IconKind, LyricsAlign};
 use crate::lyrics::{LyricsManager, LyricsStatus};
 use crate::queue::Queue;
 use crate::spotify::Spotify;
@@ -17,6 +19,7 @@ pub struct LyricsView {
     queue: Arc<Queue>,
     spotify: Spotify,
     manager: Arc<LyricsManager>,
+    cfg: Arc<Config>,
     /// Top visible line when scrolling manually.
     scroll: RwLock<usize>,
     /// Whether the view auto-follows the currently sung line.
@@ -25,11 +28,17 @@ pub struct LyricsView {
 }
 
 impl LyricsView {
-    pub fn new(queue: Arc<Queue>, spotify: Spotify, manager: Arc<LyricsManager>) -> Self {
+    pub fn new(
+        queue: Arc<Queue>,
+        spotify: Spotify,
+        manager: Arc<LyricsManager>,
+        cfg: Arc<Config>,
+    ) -> Self {
         Self {
             queue,
             spotify,
             manager,
+            cfg,
             scroll: RwLock::new(0),
             follow: RwLock::new(true),
             last_size: RwLock::new(Vec2::zero()),
@@ -64,27 +73,113 @@ impl LyricsView {
         }
     }
 
+    fn align(&self) -> LyricsAlign {
+        self.cfg
+            .values()
+            .lyrics
+            .as_ref()
+            .and_then(|lyrics| lyrics.align)
+            .unwrap_or_default()
+    }
+
+    /// The display rows after wrapping all logical lines to `wrap_width`,
+    /// plus the row to keep vertically centered (the middle row of the
+    /// currently sung line). Each row carries the index of its logical line
+    /// and whether it is that line's first row.
+    fn display_rows(&self, wrap_width: usize) -> (Vec<DisplayRow>, Option<usize>, Option<usize>) {
+        let (lines, current) = self.lines();
+
+        let mut rows = Vec::with_capacity(lines.len());
+        let mut current_center_row = None;
+        for (logical, line) in lines.iter().enumerate() {
+            let segments = wrap_line(line, wrap_width);
+            if current == Some(logical) {
+                current_center_row = Some(rows.len() + (segments.len() - 1) / 2);
+            }
+            rows.extend(segments.into_iter().enumerate().map(|(i, text)| DisplayRow {
+                logical,
+                first: i == 0,
+                text,
+            }));
+        }
+        (rows, current, current_center_row)
+    }
+
     fn scroll_by(&self, delta: i32) {
-        let (lines, _) = self.lines();
-        let height = self.last_size.read().unwrap().y.max(1);
-        let max_top = lines.len().saturating_sub(height);
+        let size = *self.last_size.read().unwrap();
+        let gutter = self.cfg.icon(IconKind::LyricsCurrent).width();
+        let (rows, _, _) = self.display_rows(size.x.saturating_sub(gutter).max(1));
+        let height = size.y.max(1);
+        let max_top = rows.len().saturating_sub(height / 2);
         let mut scroll = self.scroll.write().unwrap();
         *scroll = scroll.saturating_add_signed(delta as isize).min(max_top);
         *self.follow.write().unwrap() = false;
     }
 }
 
+struct DisplayRow {
+    /// Index of the logical lyrics line this row belongs to.
+    logical: usize,
+    /// Whether this is the first row of its logical line.
+    first: bool,
+    text: String,
+}
+
+/// Greedily word-wrap `line` to rows of at most `width` cells, hard-splitting
+/// words that are wider than a full row. Empty lines yield one empty row.
+fn wrap_line(line: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut rows = vec![String::new()];
+    let mut row_width = 0;
+
+    for word in line.split_whitespace() {
+        let word_width = word.width();
+        if row_width > 0 && row_width + 1 + word_width > width {
+            rows.push(String::new());
+            row_width = 0;
+        }
+
+        if word_width > width {
+            for character in word.chars() {
+                let character_width = character.width().unwrap_or(0);
+                if row_width > 0 && row_width + character_width > width {
+                    rows.push(String::new());
+                    row_width = 0;
+                }
+                rows.last_mut().unwrap().push(character);
+                row_width += character_width;
+            }
+        } else {
+            if row_width > 0 {
+                rows.last_mut().unwrap().push(' ');
+                row_width += 1;
+            }
+            rows.last_mut().unwrap().push_str(word);
+            row_width += word_width;
+        }
+    }
+
+    rows
+}
+
 impl View for LyricsView {
     fn draw(&self, printer: &Printer) {
-        let (lines, current) = self.lines();
         let height = printer.size.y;
+        let align = self.align();
 
+        // Gutter on the left side for the current-line marker. Probe with
+        // the icon first so the wrap width accounts for it.
+        let icon = self.cfg.icon(IconKind::LyricsCurrent);
+        let gutter = icon.width();
+        let wrap_width = printer.size.x.saturating_sub(gutter).max(1);
+
+        let (rows, current, current_center_row) = self.display_rows(wrap_width);
+        let gutter = if current.is_some() { gutter } else { 0 };
+
+        // Keep the current line vertically centered, even near the end of
+        // the lyrics (the text simply keeps scrolling up).
         let top = if *self.follow.read().unwrap() {
-            // Keep the current line vertically centered.
-            current
-                .unwrap_or(0)
-                .saturating_sub(height / 2)
-                .min(lines.len().saturating_sub(height))
+            current_center_row.unwrap_or(0).saturating_sub(height / 2)
         } else {
             *self.scroll.read().unwrap()
         };
@@ -94,23 +189,42 @@ impl View for LyricsView {
             ColorType::Color(*printer.theme.palette.custom("playing_bg").unwrap()),
         ))
         .combine(Effect::Bold);
-        let other_style = ColorStyle::new(
+        let past_style = Style::from(ColorStyle::new(
             ColorType::Palette(PaletteColor::Primary),
+            ColorType::Palette(PaletteColor::Primary),
+        ))
+        .combine(Effect::Dim);
+        // "Shadow" style for the lines that haven't been sung yet.
+        let upcoming_style = Style::from(ColorStyle::new(
             ColorType::Palette(PaletteColor::Background),
-        );
+            ColorType::Palette(PaletteColor::Background),
+        ));
 
-        for (row, line) in lines.iter().skip(top).take(height).enumerate() {
-            let index = top + row;
-            let x = (printer.size.x.saturating_sub(line.width())) / 2;
-            if current == Some(index) {
-                printer.with_style(current_style, |printer| {
-                    printer.print((x, row), line);
-                });
-            } else {
-                printer.with_color(other_style, |printer| {
-                    printer.print((x, row), line);
-                });
-            }
+        for (row, display_row) in rows.iter().skip(top).take(height).enumerate() {
+            let x = match align {
+                LyricsAlign::Left => gutter,
+                LyricsAlign::Center => {
+                    ((printer.size.x.saturating_sub(display_row.text.width())) / 2).max(gutter)
+                }
+                LyricsAlign::Right => printer
+                    .size
+                    .x
+                    .saturating_sub(display_row.text.width())
+                    .max(gutter),
+            };
+
+            let style = match current {
+                Some(current) if display_row.logical == current => current_style,
+                Some(current) if display_row.logical > current => upcoming_style,
+                Some(_) | None => past_style,
+            };
+
+            printer.with_style(style, |printer| {
+                if display_row.first && current == Some(display_row.logical) {
+                    printer.print((0, row), &icon);
+                }
+                printer.print((x, row), &display_row.text);
+            });
         }
     }
 
@@ -120,6 +234,26 @@ impl View for LyricsView {
 
     fn needs_relayout(&self) -> bool {
         false
+    }
+
+    fn on_event(&mut self, event: Event) -> EventResult {
+        match event {
+            Event::Mouse {
+                event: MouseEvent::WheelUp,
+                ..
+            } => {
+                self.scroll_by(-2);
+                EventResult::consumed()
+            }
+            Event::Mouse {
+                event: MouseEvent::WheelDown,
+                ..
+            } => {
+                self.scroll_by(2);
+                EventResult::consumed()
+            }
+            _ => EventResult::Ignored,
+        }
     }
 }
 
@@ -164,5 +298,39 @@ impl ViewExt for LyricsView {
             }
             _ => Ok(CommandResult::Ignored),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wrap_short_line_untouched() {
+        assert_eq!(wrap_line("hello world", 20), vec!["hello world"]);
+    }
+
+    #[test]
+    fn wrap_at_word_boundaries() {
+        assert_eq!(
+            wrap_line("the quick brown fox jumps", 10),
+            vec!["the quick", "brown fox", "jumps"]
+        );
+    }
+
+    #[test]
+    fn wrap_hard_splits_overlong_words() {
+        assert_eq!(wrap_line("abcdefghij", 4), vec!["abcd", "efgh", "ij"]);
+    }
+
+    #[test]
+    fn wrap_keeps_empty_lines() {
+        assert_eq!(wrap_line("", 10), vec![""]);
+    }
+
+    #[test]
+    fn wrap_exact_fit() {
+        assert_eq!(wrap_line("ab cd", 5), vec!["ab cd"]);
+        assert_eq!(wrap_line("ab cde", 5), vec!["ab", "cde"]);
     }
 }

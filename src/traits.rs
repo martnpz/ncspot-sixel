@@ -76,6 +76,12 @@ pub trait ViewExt: View {
     fn on_command(&mut self, _s: &mut Cursive, _cmd: &Command) -> Result<CommandResult, String> {
         Ok(CommandResult::Ignored)
     }
+
+    /// Invoked when the user clicks the pane title of this view in the pane
+    /// layout (e.g. to open a dropdown menu anchored there).
+    fn on_title_action(&mut self) -> cursive::event::EventResult {
+        cursive::event::EventResult::Ignored
+    }
 }
 
 impl<V: ViewExt> ViewExt for NamedView<V> {
@@ -93,6 +99,11 @@ impl<V: ViewExt> ViewExt for NamedView<V> {
 
     fn on_command(&mut self, s: &mut Cursive, cmd: &Command) -> Result<CommandResult, String> {
         self.with_view_mut(move |v| v.on_command(s, cmd)).unwrap()
+    }
+
+    fn on_title_action(&mut self) -> cursive::event::EventResult {
+        self.with_view_mut(|v| v.on_title_action())
+            .unwrap_or(cursive::event::EventResult::Ignored)
     }
 }
 
@@ -179,5 +190,9 @@ impl ViewExt for BoxedViewExt {
 
     fn on_command(&mut self, s: &mut Cursive, cmd: &Command) -> Result<CommandResult, String> {
         self.boxed_view.on_command(s, cmd)
+    }
+
+    fn on_title_action(&mut self) -> cursive::event::EventResult {
+        self.boxed_view.on_title_action()
     }
 }

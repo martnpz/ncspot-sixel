@@ -1,0 +1,141 @@
+# Example configuration for ncspot-sixel.
+# Copy to ~/.config/ncspot/config.toml and adjust to taste.
+# All keys are optional; the values shown here are the defaults unless noted.
+# Full reference: doc/users.md
+
+# Nerd Font glyphs for playback/repeat/shuffle/saved indicators.
+use_nerdfont = true
+
+# Show the icon of the action play/pause would trigger instead of the
+# current playback state.
+flip_status_indicators = false
+
+# Screen shown after startup: "panes" (multi-pane layout, default),
+# "library", "search", "queue", "lyrics" or "cover".
+initial_screen = "panes"
+
+bitrate = 320
+gapless = true
+
+###############################################################################
+# Audio (native PipeWire sink)
+###############################################################################
+
+# Audio backend. The native PipeWire sink is the default when unset.
+# Set to "pulseaudio" to use the librespot PulseAudio backend instead.
+#backend = "pipewire"
+
+# Optional PipeWire target node (maps to target.object), e.g. a node.name
+# from `pw-cli ls Node`. Unset = let PipeWire/WirePlumber route.
+#backend_device = "alsa_output.pci-0000_00_1f.3.analog-stereo"
+
+# Requested PipeWire quantum in frames at 44.1 kHz. This is the output
+# latency: 1024 ≈ 23 ms (default), 512 ≈ 12 ms, 256 ≈ 6 ms.
+# Lower values reduce latency at the cost of more frequent wakeups.
+pipewire_quantum = 1024
+
+###############################################################################
+# Cover art
+###############################################################################
+
+# Cover renderer: "sixel" (in-process, no external tools) or "ueberzug"
+# (requires ueberzugpp). Auto-detected via the terminal's DA1 reply when
+# unset, so on a sixel-capable terminal you don't need to set this.
+#cover_backend = "sixel"
+
+# Maximum scaling ratio for cover art (useful on HiDPI displays).
+#cover_max_scale = 1.0
+
+###############################################################################
+# Pane layout (the "panes" screen)
+###############################################################################
+# Columns are listed left to right with a width in percent (must sum to at
+# most 100); each column stacks one or more panes vertically. Valid pane
+# names: browser, tracks, info, cover, lyrics, playlists, queue.
+#
+# - browser: section browser; its title is a dropdown (click it or press
+#   Shift+O) switching between Search / Playlists / Albums / Artists /
+#   Recommendations. Open the selected item with "o".
+# - tracks:  target pane where playlists/albums/etc. open as a track list
+#   with album-art thumbnails; navigation stacks here, Backspace goes back.
+# - info:    cover of the playing track + title / artist / genres.
+# - cover:   image-only cover pane; playlists: plain playlist list.
+#
+# Move focus with Tab (next pane) or Alt+h/j/k/l, or rebind the
+# "focuspane left|right|up|down|next" command.
+#
+# The layout below is the built-in default.
+
+[[layout.columns]]
+width = 20
+panes = ["browser"]
+
+[[layout.columns]]
+width = 40
+panes = ["tracks"]
+
+[[layout.columns]]
+width = 40
+panes = ["info", "lyrics"]
+
+[layout.browser]
+# Dropdown sections, in order.
+sections = ["search", "playlists", "albums", "artists", "recommendations"]
+# Section shown at startup.
+default_section = "playlists"
+# "default" keeps Spotify's natural order; "name" sorts alphabetically
+# (snapshot at startup).
+sort = "default"
+
+[layout.tracks]
+# Track row height in cells; 1 disables thumbnails.
+row_height = 2
+# Album-art thumbnails next to each track (requires a sixel terminal).
+thumbnails = true
+# Persistent filter input at the top of the track list (activate with /).
+filter_row = true
+
+[layout.info]
+# Number of artist genres shown below the cover. Note: Spotify has
+# deprecated artist genres, so this may be empty for some artists.
+genres = 2
+
+###############################################################################
+# Lyrics
+###############################################################################
+# The currently sung line is kept vertically centered (the text scrolls up
+# past the end) and marked with an icon in the left gutter; upcoming lines
+# are dimmed. Scroll with the mouse wheel or movement keys to detach from
+# playback; press Back (Backspace) or use the "move playing" command to
+# re-attach.
+
+[lyrics]
+# Horizontal text position: "left", "center" or "right".
+align = "center"
+
+###############################################################################
+# Icons
+###############################################################################
+# Override individual icons. Unset icons fall back to Nerd Font defaults
+# when use_nerdfont is enabled, ASCII defaults otherwise.
+
+#[icons]
+#playing = "▶ "
+#paused = "▮▮"
+#stopped = "◼ "
+#repeat = "[R] "
+#repeat_track = "[R1] "
+#shuffle = "[Z] "
+#saved = "♥"
+#updating = "[U] "
+#lyrics_current = "♪ "
+
+###############################################################################
+# Keybindings
+###############################################################################
+# Lyrics screen is on F9, the pane layout on F4 by default. Example of
+# rebinding pane focus movement:
+
+#[keybindings]
+#"Shift+Right" = "focuspane right"
+#"Shift+Left" = "focuspane left"

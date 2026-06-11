@@ -22,9 +22,21 @@ use crate::traits::ViewExt;
 
 pub struct Pane {
     kind: String,
-    view: Box<dyn ViewExt>,
+    /// Stack of views; the last entry is shown. `Back` pops down to the
+    /// first (root) view, which is never removed.
+    views: Vec<Box<dyn ViewExt>>,
     /// Area of this pane, computed during layout. In view coordinates.
     rect: Rect,
+}
+
+impl Pane {
+    fn top(&self) -> &dyn ViewExt {
+        self.views.last().unwrap().as_ref()
+    }
+
+    fn top_mut(&mut self) -> &mut Box<dyn ViewExt> {
+        self.views.last_mut().unwrap()
+    }
 }
 
 /// Empty pane content shown until a real view is swapped in (e.g. the tracks
@@ -73,6 +85,29 @@ pub struct PaneLayoutView {
 /// Height of the per-pane title row.
 const TITLE_HEIGHT: usize = 1;
 
+/// Show `view` in the "tracks" pane when the pane screen is currently
+/// active, otherwise push it onto the fullscreen layout stack. Use this for
+/// view-opening paths that bypass the command pipeline (mouse clicks,
+/// context menu actions).
+pub fn show_view(s: &mut cursive::Cursive, view: Box<dyn ViewExt>) {
+    use crate::ext_traits::CursiveExt;
+
+    let mut view = Some(view);
+    // call_on_name only reaches the pane layout while its screen is active.
+    s.call_on_name("panes", |panes: &mut PaneLayoutView| {
+        if let Some(v) = view.take() {
+            view = panes.push_to_pane("tracks", v);
+        }
+    });
+    match view {
+        None => log::debug!("opened view in tracks pane"),
+        Some(view) => {
+            log::debug!("opened view fullscreen");
+            s.on_layout(|_, mut layout| layout.push_view(view));
+        }
+    }
+}
+
 impl PaneLayoutView {
     /// Build the pane layout from `config`, taking the views from `make_view`.
     /// Pane names that `make_view` doesn't know are skipped with an error log.
@@ -95,7 +130,7 @@ impl PaneLayoutView {
                 match make_view(kind) {
                     Some(view) => panes.push(Pane {
                         kind: kind.clone(),
-                        view,
+                        views: vec![view],
                         rect: Rect::from_size((0, 0), (0, 0)),
                     }),
                     None => error!(r#"unknown pane "{kind}" in [layout] config, skipping"#),
@@ -162,26 +197,22 @@ impl PaneLayoutView {
 
         if (col, row) != self.focused {
             if let Some(pane) = self.focused_pane() {
-                pane.view.on_leave();
+                pane.top().on_leave();
             }
             self.focused = (col, row);
         }
     }
 
-    /// Replace the view inside the first pane of `kind`. Returns the view
-    /// back when no pane of that kind is configured.
-    fn replace_pane(
-        &mut self,
-        kind: &str,
-        view: Box<dyn ViewExt>,
-    ) -> Option<Box<dyn ViewExt>> {
+    /// Push a view onto the stack of the first pane of `kind`. Returns the
+    /// view back when no pane of that kind is configured.
+    fn push_to_pane(&mut self, kind: &str, view: Box<dyn ViewExt>) -> Option<Box<dyn ViewExt>> {
         for (column_index, column) in self.columns.iter_mut().enumerate() {
             for (pane_index, pane) in column.panes.iter_mut().enumerate() {
                 if pane.kind == kind {
-                    pane.view.on_leave();
-                    pane.view = view;
+                    pane.top().on_leave();
+                    pane.views.push(view);
                     let rect = pane.rect;
-                    pane.view
+                    pane.top_mut()
                         .layout(rect.size().saturating_sub((0, TITLE_HEIGHT)));
                     // Move focus to the freshly populated pane.
                     self.focused = (column_index, pane_index);
@@ -190,6 +221,21 @@ impl PaneLayoutView {
             }
         }
         Some(view)
+    }
+
+    /// Pop the focused pane's stack. Returns whether something was popped.
+    fn pop_focused(&mut self) -> bool {
+        if let Some(pane) = self.focused_pane_mut()
+            && pane.views.len() > 1
+        {
+            pane.top().on_leave();
+            pane.views.pop();
+            let rect = pane.rect;
+            pane.top_mut()
+                .layout(rect.size().saturating_sub((0, TITLE_HEIGHT)));
+            return true;
+        }
+        false
     }
 
     fn pane_at(&self, position: Vec2) -> Option<(usize, usize)> {
@@ -211,8 +257,13 @@ impl View for PaneLayoutView {
                 let focused = (column_index, pane_index) == self.focused;
                 let rect = pane.rect;
 
-                // Pane title row, highlighted for the focused pane.
-                let title = pane.view.title();
+                // Pane title row, highlighted for the focused pane. With a
+                // stacked view, show a back marker.
+                let title = if pane.views.len() > 1 {
+                    format!("< {}", pane.top().title())
+                } else {
+                    pane.top().title()
+                };
                 let style = if focused {
                     ColorStyle::title_primary()
                 } else {
@@ -228,7 +279,7 @@ impl View for PaneLayoutView {
                     .offset(rect.top_left() + (0, TITLE_HEIGHT))
                     .cropped((rect.width(), rect.height().saturating_sub(TITLE_HEIGHT)))
                     .focused(focused);
-                pane.view.draw(content);
+                pane.top().draw(content);
             }
         }
     }
@@ -256,7 +307,7 @@ impl View for PaneLayoutView {
                     size.y / pane_count
                 };
                 pane.rect = Rect::from_size((x, y), (width, height));
-                pane.view
+                pane.top_mut()
                     .layout(Vec2::new(width, height.saturating_sub(TITLE_HEIGHT)));
                 y += height;
             }
@@ -276,28 +327,34 @@ impl View for PaneLayoutView {
             // Focus the pane under the cursor on click, then forward.
             let local = position.saturating_sub(offset);
             if let Some(target) = self.pane_at(local) {
-                if target != self.focused
-                    && matches!(
-                        event,
-                        Event::Mouse {
-                            event: MouseEvent::Press(_),
-                            ..
-                        }
-                    )
-                {
+                let is_press = matches!(
+                    event,
+                    Event::Mouse {
+                        event: MouseEvent::Press(_),
+                        ..
+                    }
+                );
+                if target != self.focused && is_press {
                     self.focused = target;
                 }
                 let rect = self.columns[target.0].panes[target.1].rect;
                 let pane = &mut self.columns[target.0].panes[target.1];
+
+                // A click on the pane's title row triggers its title action
+                // (e.g. the browser pane's dropdown menu).
+                if is_press && local.y == rect.top() {
+                    return pane.top_mut().on_title_action();
+                }
+
                 return pane
-                    .view
+                    .top_mut()
                     .on_event(event.relativized(rect.top_left() + (0, TITLE_HEIGHT)));
             }
             return EventResult::Ignored;
         }
 
         match self.focused_pane_mut() {
-            Some(pane) => pane.view.on_event(event),
+            Some(pane) => pane.top_mut().on_event(event),
             None => EventResult::Ignored,
         }
     }
@@ -305,14 +362,16 @@ impl View for PaneLayoutView {
     fn call_on_any(&mut self, selector: &Selector, callback: cursive::event::AnyCb) {
         for column in &mut self.columns {
             for pane in &mut column.panes {
-                pane.view.call_on_any(selector, callback);
+                for view in &mut pane.views {
+                    view.call_on_any(selector, callback);
+                }
             }
         }
     }
 
     fn take_focus(&mut self, source: Direction) -> Result<EventResult, CannotFocus> {
         match self.focused_pane_mut() {
-            Some(pane) => pane.view.take_focus(source),
+            Some(pane) => pane.top_mut().take_focus(source),
             None => Err(CannotFocus),
         }
     }
@@ -325,7 +384,7 @@ impl ViewExt for PaneLayoutView {
 
     fn on_leave(&self) {
         if let Some(pane) = self.focused_pane() {
-            pane.view.on_leave();
+            pane.top().on_leave();
         }
     }
 
@@ -336,18 +395,26 @@ impl ViewExt for PaneLayoutView {
         }
 
         let result = match self.focused_pane_mut() {
-            Some(pane) => pane.view.on_command(s, cmd)?,
+            Some(pane) => pane.top_mut().on_command(s, cmd)?,
             None => CommandResult::Ignored,
         };
 
         // A pane wants to open a view (e.g. a playlist's tracks, an album):
-        // show it in the "tracks" pane instead of pushing a fullscreen view.
+        // push it onto the "tracks" pane's stack instead of going fullscreen.
         if let CommandResult::View(view) = result {
-            return match self.replace_pane("tracks", view) {
+            return match self.push_to_pane("tracks", view) {
                 None => Ok(CommandResult::Consumed(None)),
                 // No tracks pane configured; let Layout handle it as usual.
                 Some(view) => Ok(CommandResult::View(view)),
             };
+        }
+
+        // Back pops the focused pane's stack before bubbling up to Layout.
+        if matches!(cmd, Command::Back)
+            && matches!(result, CommandResult::Ignored)
+            && self.pop_focused()
+        {
+            return Ok(CommandResult::Consumed(None));
         }
 
         Ok(result)

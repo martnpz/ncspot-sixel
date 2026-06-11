@@ -14,7 +14,7 @@ use crate::model::track::Track;
 use crate::queue::Queue;
 use crate::spotify::Spotify;
 use crate::traits::{IntoBoxedViewExt, ListItem, ViewExt};
-use crate::ui::{album::AlbumView, listview::ListView};
+use crate::ui::{listview::ListView, tracklist::TrackListView};
 
 #[derive(Clone, Deserialize, Serialize)]
 pub struct Album {
@@ -239,7 +239,27 @@ impl ListItem for Album {
     }
 
     fn open(&self, queue: Arc<Queue>, library: Arc<Library>) -> Option<Box<dyn ViewExt>> {
-        Some(AlbumView::new(queue, library, self).into_boxed_view_ext())
+        let mut album = self.clone();
+        album.load_all_tracks(queue.get_spotify());
+        let tracks: Vec<Playable> = album
+            .tracks
+            .unwrap_or_default()
+            .into_iter()
+            .map(Playable::Track)
+            .collect();
+        let cfg = library.cfg.clone();
+        Some(
+            TrackListView::new(
+                Arc::new(RwLock::new(tracks)),
+                queue,
+                library,
+                cfg,
+                #[cfg(feature = "cover")]
+                crate::ui::cover::sixel::shared(),
+            )
+            .with_title(&self.title)
+            .into_boxed_view_ext(),
+        )
     }
 
     fn open_recommendations(

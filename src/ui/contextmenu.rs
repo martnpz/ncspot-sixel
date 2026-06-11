@@ -16,7 +16,6 @@ use crate::queue::Queue;
 use crate::sharing::write_share;
 use crate::spotify::PlayerEvent;
 use crate::traits::{ListItem, ViewExt};
-use crate::ui::layout::Layout;
 use crate::ui::modal::Modal;
 use crate::{command::Command, spotify::Spotify};
 use cursive::traits::{Finder, Nameable};
@@ -162,7 +161,7 @@ impl ContextMenu {
             match selected_action {
                 true => {
                     if let Some(view) = moved_artist.clone().open(queue.clone(), library.clone()) {
-                        s.call_on_name("main", |v: &mut Layout| v.push_view(view));
+                        crate::ui::panes::show_view(s, view);
                     }
                 }
                 false => {
@@ -300,7 +299,7 @@ impl ContextMenu {
                 match action {
                     ContextMenuAction::ShowItem(item) => {
                         if let Some(view) = item.open(queue, library) {
-                            s.call_on_name("main", move |v: &mut Layout| v.push_view(view));
+                            crate::ui::panes::show_view(s, view);
                         }
                     }
                     #[cfg(feature = "share_clipboard")]
@@ -314,7 +313,7 @@ impl ContextMenu {
                     }
                     ContextMenuAction::ShowRecommendations(item) => {
                         if let Some(view) = item.to_owned().open_recommendations(queue, library) {
-                            s.call_on_name("main", move |v: &mut Layout| v.push_view(view));
+                            crate::ui::panes::show_view(s, view);
                         }
                     }
                     ContextMenuAction::SelectArtist(artists) => {

@@ -4,8 +4,10 @@ use ncspot::BIN_NAME;
 pub mod album;
 pub mod artist;
 pub mod browse;
+pub mod browser;
 pub mod contextmenu;
 pub mod help;
+pub mod info;
 pub mod layout;
 pub mod library;
 pub mod listview;
@@ -13,7 +15,6 @@ pub mod lyrics;
 pub mod modal;
 pub mod pagination;
 pub mod panes;
-pub mod playlist;
 pub mod playlists;
 pub mod queue;
 pub mod search;
@@ -21,6 +22,7 @@ pub mod search_results;
 pub mod show;
 pub mod statusbar;
 pub mod tabbedview;
+pub mod tracklist;
 
 #[cfg(feature = "cover")]
 pub mod cover;

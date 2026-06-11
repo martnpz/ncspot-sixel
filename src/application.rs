@@ -69,6 +69,8 @@ pub struct Application {
     event_manager: EventManager,
     /// Owner of the lyrics for the currently playing track.
     lyrics_manager: Arc<crate::lyrics::LyricsManager>,
+    /// Cached artist genres for the info pane.
+    genres_cache: ui::info::GenresCache,
     /// An IPC implementation using the D-Bus MPRIS protocol, used to control and inspect ncspot.
     #[cfg(unix)]
     ipc: Option<IpcSocket>,
@@ -201,11 +203,14 @@ impl Application {
         let queueview = ui::queue::QueueView::new(queue.clone(), library.clone());
 
         #[cfg(feature = "cover")]
+        let sixel_images = Arc::new(ui::cover::sixel::SixelImageCache::new(event_manager.clone()));
+
+        #[cfg(feature = "cover")]
         let coverview = ui::cover::CoverView::new(
             queue.clone(),
             library.clone(),
             &configuration,
-            event_manager.clone(),
+            sixel_images.clone(),
         );
 
         let lyrics_manager = Arc::new(crate::lyrics::LyricsManager::new(
@@ -216,6 +221,7 @@ impl Application {
             queue.clone(),
             spotify.clone(),
             lyrics_manager.clone(),
+            configuration.clone(),
         );
 
         let status = ui::statusbar::StatusBar::new(queue.clone(), Arc::clone(&library));
@@ -231,10 +237,35 @@ impl Application {
 
         layout.add_screen("lyrics", lyricsview.with_name("lyrics"));
 
+        let genres_cache: ui::info::GenresCache = Default::default();
+
+        // Track-list thumbnails are sixel-only; disable them when the
+        // terminal can't show them (unless sixel is forced via config).
+        #[cfg(feature = "cover")]
+        let thumbnails = (ui::cover::sixel_supported()
+            || configuration.values().cover_backend.as_deref() == Some("sixel"))
+        .then(|| sixel_images.clone());
+        #[cfg(feature = "cover")]
+        if let Some(images) = &thumbnails {
+            ui::cover::sixel::set_shared(images.clone());
+        }
+
         let layout_config = configuration.values().layout.clone().unwrap_or_default();
         let panes_view = ui::panes::PaneLayoutView::new(&layout_config, |kind| {
             use crate::traits::IntoBoxedViewExt;
             match kind {
+                "browser" => Some(
+                    ui::browser::BrowserView::new(
+                        queue.clone(),
+                        library.clone(),
+                        event_manager.clone(),
+                        configuration.clone(),
+                        #[cfg(feature = "cover")]
+                        thumbnails.clone(),
+                    )
+                    .with_name("browser")
+                    .into_boxed_view_ext(),
+                ),
                 "playlists" => Some(
                     ui::playlists::PlaylistsView::new(queue.clone(), library.clone())
                         .into_boxed_view_ext(),
@@ -252,7 +283,22 @@ impl Application {
                         queue.clone(),
                         library.clone(),
                         &configuration,
-                        event_manager.clone(),
+                        sixel_images.clone(),
+                    )
+                    .into_boxed_view_ext(),
+                ),
+                "info" => Some(
+                    ui::info::InfoView::new(
+                        queue.clone(),
+                        configuration.clone(),
+                        genres_cache.clone(),
+                        #[cfg(feature = "cover")]
+                        ui::cover::CoverView::new(
+                            queue.clone(),
+                            library.clone(),
+                            &configuration,
+                            sixel_images.clone(),
+                        ),
                     )
                     .into_boxed_view_ext(),
                 ),
@@ -261,6 +307,7 @@ impl Application {
                         queue.clone(),
                         spotify.clone(),
                         lyrics_manager.clone(),
+                        configuration.clone(),
                     )
                     .into_boxed_view_ext(),
                 ),
@@ -300,6 +347,7 @@ impl Application {
             spotify,
             event_manager,
             lyrics_manager,
+            genres_cache,
             #[cfg(unix)]
             ipc,
             cursive,
@@ -345,6 +393,12 @@ impl Application {
                     Event::TrackChanged(playable) => {
                         trace!("track changed: {playable}");
                         self.lyrics_manager.fetch(&playable);
+                        ui::info::fetch_genres(
+                            &self.genres_cache,
+                            &self.spotify,
+                            &self.event_manager,
+                            &playable,
+                        );
                     }
                     Event::SessionDied => {
                         if self.spotify.start_worker(None).is_err() {

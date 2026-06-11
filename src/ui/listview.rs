@@ -13,7 +13,6 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::command::{Command, GotoMode, InsertSource, JumpMode, MoveAmount, MoveMode, TargetMode};
 use crate::commands::CommandResult;
-use crate::ext_traits::CursiveExt;
 use crate::library::Library;
 use crate::model::album::Album;
 use crate::model::artist::Artist;
@@ -193,19 +192,6 @@ impl<I: ListItem + Clone> ListView<I> {
         }
     }
 
-    /// Remove the item at `index` from the list.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `index` is out of bounds.
-    pub fn remove(&mut self, index: usize) {
-        let mut c = self.content.write().unwrap();
-        c.remove(index);
-        if self.selected >= c.len() {
-            self.selected = self.selected.saturating_sub(1);
-        }
-    }
-
     /// Get the selected row from a mouse position and offset
     fn get_selected_row(&self, position: XY<usize>, offset: XY<usize>) -> Option<usize> {
         let viewport = self.scroller.content_viewport().top_left();
@@ -281,7 +267,7 @@ impl<I: ListItem + Clone> ListView<I> {
                         {
                             return MouseHandleResult::Handled(EventResult::Consumed(Some(
                                 Callback::from_fn_once(move |s| {
-                                    s.on_layout(|_, mut l| l.push_view(view));
+                                    crate::ui::panes::show_view(s, view);
                                 }),
                             )));
                         }

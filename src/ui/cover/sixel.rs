@@ -23,23 +23,37 @@ use super::CoverBackend;
 /// Spotify covers are at most 640x640.
 const MAX_COVER_PX: usize = 640;
 
+/// Process-wide handle to the image cache for view-construction sites that
+/// dependency injection can't reach (e.g. [`crate::traits::ListItem::open`]).
+/// Set once at startup when thumbnails are available.
+static SHARED: std::sync::OnceLock<Arc<SixelImageCache>> = std::sync::OnceLock::new();
+
+pub fn set_shared(images: Arc<SixelImageCache>) {
+    SHARED.set(images).ok();
+}
+
+pub fn shared() -> Option<Arc<SixelImageCache>> {
+    SHARED.get().cloned()
+}
+
 /// (cover URL, target width px, target height px)
 type CacheKey = (String, usize, usize);
 
-struct EncodeJob {
-    key: CacheKey,
-    path: PathBuf,
-}
-
-pub struct SixelBackend {
-    jobs: mpsc::Sender<EncodeJob>,
+/// Shared service that turns cover URLs into encoded sixel images of a
+/// requested pixel size. Downloading, decoding, resizing and encoding all
+/// happen on a worker thread; [SixelImageCache::get] never blocks. Used by
+/// the cover backend and by track-list thumbnails.
+pub struct SixelImageCache {
+    jobs: mpsc::Sender<CacheKey>,
     cache: Arc<RwLock<HashMap<CacheKey, Arc<String>>>>,
     pending: Arc<RwLock<HashSet<CacheKey>>>,
+    /// Solid-background sixels used to blank image slots, keyed by size.
+    blanks: RwLock<HashMap<(usize, usize), Arc<String>>>,
 }
 
-impl SixelBackend {
+impl SixelImageCache {
     pub fn new(events: EventManager) -> Self {
-        let (jobs, job_rx) = mpsc::channel::<EncodeJob>();
+        let (jobs, job_rx) = mpsc::channel::<CacheKey>();
         let cache: Arc<RwLock<HashMap<CacheKey, Arc<String>>>> = Default::default();
         let pending: Arc<RwLock<HashSet<CacheKey>>> = Default::default();
 
@@ -49,15 +63,15 @@ impl SixelBackend {
                 let cache = cache.clone();
                 let pending = pending.clone();
                 move || {
-                    while let Ok(job) = job_rx.recv() {
-                        match encode(&job) {
+                    while let Ok(key) = job_rx.recv() {
+                        match encode(&key) {
                             Ok(sixel) => {
-                                cache.write().unwrap().insert(job.key.clone(), Arc::new(sixel));
+                                cache.write().unwrap().insert(key.clone(), Arc::new(sixel));
                                 events.trigger();
                             }
-                            Err(e) => error!("failed to sixel-encode {:?}: {e}", job.path),
+                            Err(e) => error!("failed to sixel-encode {}: {e}", key.0),
                         }
-                        pending.write().unwrap().remove(&job.key);
+                        pending.write().unwrap().remove(&key);
                     }
                 }
             })
@@ -67,7 +81,63 @@ impl SixelBackend {
             jobs,
             cache,
             pending,
+            blanks: RwLock::new(HashMap::new()),
         }
+    }
+
+    /// The encoded sixel for `url` at `width`x`height` pixels if it is ready.
+    /// Otherwise schedules download + encode on the worker and returns None;
+    /// the [EventManager] is triggered when the image becomes available.
+    pub fn get(&self, url: &str, width: usize, height: usize) -> Option<Arc<String>> {
+        if width == 0 || height == 0 {
+            return None;
+        }
+        let key: CacheKey = (url.to_string(), width, height);
+        if let Some(sixel) = self.cache.read().unwrap().get(&key) {
+            return Some(sixel.clone());
+        }
+        let mut pending = self.pending.write().unwrap();
+        if !pending.contains(&key) {
+            pending.insert(key.clone());
+            let _ = self.jobs.send(key);
+        }
+        None
+    }
+
+    /// A solid background-colored sixel used to blank an image slot.
+    /// Encoded on first use per size; cheap (single-color image).
+    pub fn blank(&self, width: usize, height: usize) -> Option<Arc<String>> {
+        if width == 0 || height == 0 {
+            return None;
+        }
+        if let Some(blank) = self.blanks.read().unwrap().get(&(width, height)) {
+            return Some(blank.clone());
+        }
+        // Opaque black: emitting it overwrites stale pixels (a transparent
+        // sixel would leave them in place).
+        let pixels = vec![0u8; width * height * 4]
+            .chunks_exact(4)
+            .flat_map(|_| [0, 0, 0, 255])
+            .collect::<Vec<u8>>();
+        let sixel = icy_sixel::SixelImage::try_from_rgba(pixels, width, height)
+            .and_then(|image| image.encode())
+            .ok()?;
+        let blank = Arc::new(sixel);
+        self.blanks
+            .write()
+            .unwrap()
+            .insert((width, height), blank.clone());
+        Some(blank)
+    }
+}
+
+pub struct SixelBackend {
+    images: Arc<SixelImageCache>,
+}
+
+impl SixelBackend {
+    pub fn new(images: Arc<SixelImageCache>) -> Self {
+        Self { images }
     }
 }
 
@@ -75,7 +145,7 @@ impl CoverBackend for SixelBackend {
     fn draw(
         &self,
         url: &str,
-        path: &Path,
+        _path: &Path,
         draw_offset: Vec2,
         draw_size: Vec2,
         font_size: Vec2,
@@ -91,17 +161,7 @@ impl CoverBackend for SixelBackend {
             return false;
         }
 
-        let key: CacheKey = (url.to_string(), side_px, side_px);
-        let sixel = self.cache.read().unwrap().get(&key).cloned();
-        let Some(sixel) = sixel else {
-            let mut pending = self.pending.write().unwrap();
-            if !pending.contains(&key) {
-                pending.insert(key.clone());
-                let _ = self.jobs.send(EncodeJob {
-                    key,
-                    path: path.to_path_buf(),
-                });
-            }
+        let Some(sixel) = self.images.get(url, side_px, side_px) else {
             return false;
         };
 
@@ -127,7 +187,9 @@ impl CoverBackend for SixelBackend {
 
 /// Write the encoded sixel to the terminal at `pos` (cell coordinates),
 /// preserving the cursor and using synchronized updates to avoid tearing.
-fn emit(sixel: &str, pos: Vec2) -> std::io::Result<()> {
+/// Must only be called from the cursive draw thread, so our bytes serialize
+/// with crossterm's output.
+pub fn emit(sixel: &str, pos: Vec2) -> std::io::Result<()> {
     let mut tty = OpenOptions::new().write(true).open("/dev/tty")?;
     let mut out = Vec::with_capacity(sixel.len() + 64);
     // begin synchronized update; save cursor; move to cell
@@ -139,11 +201,13 @@ fn emit(sixel: &str, pos: Vec2) -> std::io::Result<()> {
     tty.write_all(&out)
 }
 
-/// Load, resize and encode a cover image. Slow; runs on the encoder thread.
-fn encode(job: &EncodeJob) -> Result<String, String> {
-    let (_, width, height) = (&job.key.0, job.key.1, job.key.2);
+/// Download (if needed), load, resize and encode a cover image. Slow; runs
+/// on the encoder thread.
+fn encode(key: &CacheKey) -> Result<String, String> {
+    let (url, width, height) = (&key.0, key.1, key.2);
 
-    let cache_file = sixel_cache_file(&job.path, width, height);
+    let path = crate::utils::cache_path_for_url(url.clone());
+    let cache_file = sixel_cache_file(&path, width, height);
     if let Ok(mut file) = File::open(&cache_file) {
         let mut sixel = String::new();
         if file.read_to_string(&mut sixel).is_ok() && !sixel.is_empty() {
@@ -152,9 +216,13 @@ fn encode(job: &EncodeJob) -> Result<String, String> {
         }
     }
 
-    debug!("sixel-encoding {:?} at {width}x{height}", job.path);
+    if !path.exists() {
+        crate::utils::download(url.clone(), path.clone()).map_err(|e| e.to_string())?;
+    }
+
+    debug!("sixel-encoding {path:?} at {width}x{height}");
     // Cover cache files have no extension, so sniff the format from content.
-    let image = image::ImageReader::open(&job.path)
+    let image = image::ImageReader::open(&path)
         .and_then(|reader| reader.with_guessed_format())
         .map_err(|e| e.to_string())?
         .decode()
