@@ -232,6 +232,12 @@ impl ListItem for Playlist {
     }
 
     fn open(&self, queue: Arc<Queue>, library: Arc<Library>) -> Option<Box<dyn ViewExt>> {
+        library.cfg.with_state_mut(|state| {
+            state.last_opened = Some(crate::config::LastOpenedItem {
+                kind: "playlist".to_string(),
+                id: self.id.clone(),
+            });
+        });
         let mut playlist = self.clone();
         playlist.load_tracks(&queue.get_spotify());
         let tracks = playlist.tracks.unwrap_or_default();

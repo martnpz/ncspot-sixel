@@ -16,7 +16,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::command::{Command, GotoMode, JumpMode, MoveAmount, MoveMode, TargetMode};
 use crate::commands::CommandResult;
-use crate::config::Config;
+use crate::config::{Config, IconKind};
 use crate::library::Library;
 use crate::model::playable::{Playable, sort_playables};
 use crate::queue::Queue;
@@ -187,10 +187,13 @@ impl TrackListView {
         self.selected = self.selected.min(self.filtered.len().saturating_sub(1));
     }
 
+    fn filter_header_rows(&self) -> usize {
+        if self.filter_row_enabled() { 2 } else { 0 }
+    }
+
     /// Number of visible row slots for the current size.
     fn slot_count(&self, size: Vec2) -> usize {
-        let header = usize::from(self.filter_row_enabled());
-        size.y.saturating_sub(header) / self.row_height()
+        size.y.saturating_sub(self.filter_header_rows()) / self.row_height()
     }
 
     fn clamp_scroll(&mut self) {
@@ -276,11 +279,12 @@ impl View for TrackListView {
     fn draw(&self, printer: &Printer) {
         let row_height = self.row_height();
         let filter_row = self.filter_row_enabled();
-        let header = usize::from(filter_row);
+        let header = self.filter_header_rows();
         let slots = self.slot_count(printer.size);
 
-        // Filter input row.
+        // Filter input row (row 0) + blank spacer (row 1).
         if filter_row {
+            let icon = self.cfg.icon(IconKind::Filter);
             let style = if self.filter_active {
                 ColorStyle::highlight()
             } else {
@@ -289,9 +293,9 @@ impl View for TrackListView {
             printer.with_color(style, |printer| {
                 printer.print_hline((0, 0), printer.size.x, " ");
                 let text = if self.filter.is_empty() && !self.filter_active {
-                    "/ filter…".to_string()
+                    format!("{}filter…", icon)
                 } else {
-                    format!("/{}{}", self.filter, if self.filter_active { "▏" } else { "" })
+                    format!("{}{}{}", icon, self.filter, if self.filter_active { "▏" } else { "" })
                 };
                 printer.print((0, 0), &text);
                 if !self.filter.is_empty() {
@@ -299,6 +303,10 @@ impl View for TrackListView {
                     let x = printer.size.x.saturating_sub(count.width());
                     printer.print((x, 0), &count);
                 }
+            });
+            // Spacer row between filter input and track list.
+            printer.with_color(ColorStyle::secondary(), |printer| {
+                printer.print_hline((0, 1), printer.size.x, " ");
             });
         }
 
@@ -470,9 +478,12 @@ impl View for TrackListView {
                         EventResult::consumed()
                     }
                     MouseEvent::Press(MouseButton::Left) => {
-                        let header = usize::from(self.filter_row_enabled());
+                        let header = self.filter_header_rows();
                         if self.filter_row_enabled() && local.y == 0 {
                             self.filter_active = true;
+                            return EventResult::consumed();
+                        }
+                        if local.y < header {
                             return EventResult::consumed();
                         }
                         let slot = (local.y - header) / self.row_height();
@@ -489,7 +500,7 @@ impl View for TrackListView {
                         EventResult::consumed()
                     }
                     MouseEvent::Press(MouseButton::Right) => {
-                        let header = usize::from(self.filter_row_enabled());
+                        let header = self.filter_header_rows();
                         if local.y < header {
                             return EventResult::consumed();
                         }
@@ -525,6 +536,58 @@ impl View for TrackListView {
 impl ViewExt for TrackListView {
     fn title(&self) -> String {
         self.title.clone()
+    }
+
+    fn on_leave(&self) {
+        // Erase any sixel thumbnails we emitted. Thumbnails are written
+        // out-of-band via /dev/tty, so cursive's shadow buffer has those
+        // cells recorded as spaces. Writing spaces *again* via cursive would
+        // produce a diff of "no change" and the terminal would never receive
+        // new bytes there — leaving the sixel pixels in place.
+        //
+        // Fix: write spaces directly to /dev/tty at each thumbnail position
+        // so the terminal's pixel layer is cleared. The shadow buffer is
+        // already correct (spaces), so cursive stays consistent.
+        #[cfg(feature = "cover")]
+        {
+            use std::io::Write;
+            let cell_px = crate::ui::cover::cell_size_px(
+                self.cfg.values().cover_max_scale.unwrap_or(1.0),
+            );
+            let thumb_cols = self.thumb_columns(cell_px);
+            let row_height = self.row_height();
+            if thumb_cols > 0 {
+                let slots = self.slots.read().unwrap();
+                let has_content = slots
+                    .iter()
+                    .any(|s| !matches!(s.image, SlotImage::Empty));
+                if has_content {
+                    let spaces = " ".repeat(thumb_cols);
+                    if let Ok(mut tty) = std::fs::OpenOptions::new()
+                        .write(true)
+                        .open("/dev/tty")
+                    {
+                        let mut out = Vec::new();
+                        out.extend_from_slice(b"\x1b[?2026h\x1b7");
+                        for state in slots.iter() {
+                            if !matches!(state.image, SlotImage::Empty) {
+                                for r in 0..row_height {
+                                    let row = state.position.y + r + 1;
+                                    let col = state.position.x + 1;
+                                    out.extend_from_slice(
+                                        format!("\x1b[{row};{col}H{spaces}").as_bytes(),
+                                    );
+                                }
+                            }
+                        }
+                        out.extend_from_slice(b"\x1b8\x1b[?2026l");
+                        let _ = tty.write_all(&out);
+                    }
+                }
+            }
+        }
+        // Reset slot cache so positions are re-emitted when the view returns.
+        self.slots.write().unwrap().clear();
     }
 
     fn on_command(&mut self, _s: &mut Cursive, cmd: &Command) -> Result<CommandResult, String> {

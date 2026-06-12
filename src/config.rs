@@ -105,6 +105,7 @@ pub struct ConfigValues {
     pub library_tabs: Option<Vec<LibraryTab>>,
     pub hide_display_names: Option<bool>,
     pub ap_port: Option<u16>,
+    pub device_name: Option<String>,
     pub layout: Option<LayoutConfig>,
     pub statusbar: Option<StatusbarConfig>,
     pub icons: Option<IconsConfig>,
@@ -153,6 +154,7 @@ pub struct IconsConfig {
     pub saved: Option<String>,
     pub updating: Option<String>,
     pub lyrics_current: Option<String>,
+    pub filter: Option<String>,
 }
 
 /// The icons that can be customized through [IconsConfig].
@@ -168,6 +170,8 @@ pub enum IconKind {
     Updating,
     /// Marker shown next to the currently sung lyrics line.
     LyricsCurrent,
+    /// Icon shown at the start of the filter/search input row in the track list.
+    Filter,
 }
 
 impl IconKind {
@@ -183,6 +187,7 @@ impl IconKind {
             Self::Saved => ("\u{f012c}", "✓"),
             Self::Updating => ("\u{f04e6} ", "[U] "),
             Self::LyricsCurrent => ("\u{f075a} ", "♪ "),
+            Self::Filter => ("\u{f002} ", "/ "),
         }
     }
 }
@@ -267,17 +272,12 @@ impl Default for LayoutConfig {
         Self {
             columns: vec![
                 ColumnConfig {
-                    width: 20,
+                    width: 50,
                     panes: vec!["browser".into()],
                     heights: None,
                 },
                 ColumnConfig {
-                    width: 40,
-                    panes: vec!["tracks".into()],
-                    heights: None,
-                },
-                ColumnConfig {
-                    width: 40,
+                    width: 50,
                     panes: vec!["info".into(), "lyrics".into()],
                     heights: Some(vec![30, 70]),
                 },
@@ -335,6 +335,14 @@ pub struct QueueState {
     pub queue: Vec<Playable>,
 }
 
+/// The last playlist or album the user opened, persisted across sessions.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct LastOpenedItem {
+    /// `"playlist"` or `"album"`
+    pub kind: String,
+    pub id: String,
+}
+
 /// Runtime state that should be persisted accross sessions.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct UserState {
@@ -345,6 +353,9 @@ pub struct UserState {
     pub playlist_orders: HashMap<String, SortingOrder>,
     pub cache_version: u16,
     pub playback_state: PlaybackState,
+    /// Last opened playlist or album; re-fetched on startup.
+    #[serde(default)]
+    pub last_opened: Option<LastOpenedItem>,
 }
 
 impl Default for UserState {
@@ -357,6 +368,7 @@ impl Default for UserState {
             playlist_orders: HashMap::new(),
             cache_version: 0,
             playback_state: PlaybackState::Default,
+            last_opened: None,
         }
     }
 }
@@ -452,6 +464,7 @@ impl Config {
                 IconKind::Saved => &icons.saved,
                 IconKind::Updating => &icons.updating,
                 IconKind::LyricsCurrent => &icons.lyrics_current,
+                IconKind::Filter => &icons.filter,
             }
             .clone()
         });

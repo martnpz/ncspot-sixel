@@ -75,15 +75,11 @@ pipewire_quantum = 1024
 #padding = 0
 
 [[layout.columns]]
-width = 20
+width = 50
 panes = ["browser"]
 
 [[layout.columns]]
-width = 40
-panes = ["tracks"]
-
-[[layout.columns]]
-width = 40
+width = 50
 panes = ["info", "lyrics"]
 # Per-pane height as % of column height; last pane gets the remainder.
 # Must have the same number of entries as `panes`. Omit for even split.
@@ -158,6 +154,7 @@ align = "center"
 #saved = "♥"
 #updating = "[U] "
 #lyrics_current = "♪ "
+#filter = "> "       # icon shown in the track-list filter input row
 
 ###############################################################################
 # Keybindings

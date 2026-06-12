@@ -514,7 +514,16 @@ impl ViewExt for Layout {
                 Ok(CommandResult::Consumed(None))
             }
             Command::Back => {
-                self.pop_view();
+                // Let the current view (e.g. PaneLayoutView) handle Back first
+                // so pane-level stacks can be popped before the layout stack.
+                let result = if let Some(view) = self.get_current_view_mut() {
+                    view.on_command(s, cmd)?
+                } else {
+                    CommandResult::Ignored
+                };
+                if matches!(result, CommandResult::Ignored) {
+                    self.pop_view();
+                }
                 Ok(CommandResult::Consumed(None))
             }
             _ => {

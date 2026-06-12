@@ -292,7 +292,7 @@ impl Library {
             let mut is_done = library.is_done.write().unwrap();
             *is_done = true;
 
-            library.ev.trigger();
+            library.ev.send(crate::events::Event::LibraryLoaded);
         });
     }
 

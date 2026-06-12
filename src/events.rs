@@ -12,6 +12,8 @@ pub enum Event {
     /// A new item was loaded into the player, e.g. by playing a track from the
     /// queue or by restoring the last played track on startup.
     TrackChanged(Box<Playable>),
+    /// The library has finished its initial load from Spotify / local cache.
+    LibraryLoaded,
     SessionDied,
     IpcInput(String),
 }

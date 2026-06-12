@@ -156,14 +156,17 @@ pub fn show_view(s: &mut cursive::Cursive, view: Box<dyn ViewExt>) {
     use crate::ext_traits::CursiveExt;
 
     let mut view = Some(view);
-    // call_on_name only reaches the pane layout while its screen is active.
+    // Try "tracks" pane first; fall back to "browser" for single-column layouts.
     s.call_on_name("panes", |panes: &mut PaneLayoutView| {
         if let Some(v) = view.take() {
-            view = panes.push_to_pane("tracks", v);
+            let returned = panes.push_to_pane("tracks", v);
+            if let Some(v) = returned {
+                view = panes.push_to_pane("browser", v);
+            }
         }
     });
     match view {
-        None => log::debug!("opened view in tracks pane"),
+        None => log::debug!("opened view in tracks/browser pane"),
         Some(view) => {
             log::debug!("opened view fullscreen");
             s.on_layout(|_, mut layout| layout.push_view(view));
@@ -352,6 +355,12 @@ impl View for PaneLayoutView {
                     .offset(rect.top_left() + (inset_x, inset_y))
                     .cropped((content_w, content_h))
                     .focused(focused);
+                // Wipe the content area before each draw so text from a
+                // previous view can't bleed through when views are swapped.
+                // The shadow buffer makes this free when content is unchanged.
+                for y in 0..content_h {
+                    content.print_hline((0, y), content_w, " ");
+                }
                 pane.top().draw(content);
             }
         }
@@ -420,13 +429,20 @@ impl View for PaneLayoutView {
                     self.focused = target;
                 }
                 let rect = self.columns[target.0].panes[target.1].rect;
-                let pane = &mut self.columns[target.0].panes[target.1];
+                let views_count = self.columns[target.0].panes[target.1].views.len();
 
-                // A click on the pane's title row triggers its title action
-                // (e.g. the browser pane's dropdown menu).
+                // Title-row click: pop stack when one is open, otherwise
+                // forward to the view's own title action (e.g. browser dropdown).
                 if is_press && local.y == rect.top() {
+                    if views_count > 1 {
+                        self.pop_focused();
+                        return EventResult::consumed();
+                    }
+                    let pane = &mut self.columns[target.0].panes[target.1];
                     return pane.top_mut().on_title_action();
                 }
+
+                let pane = &mut self.columns[target.0].panes[target.1];
 
                 return pane
                     .top_mut()
@@ -482,11 +498,15 @@ impl ViewExt for PaneLayoutView {
         };
 
         // A pane wants to open a view (e.g. a playlist's tracks, an album):
-        // push it onto the "tracks" pane's stack instead of going fullscreen.
+        // try "tracks" pane first, fall back to "browser" for single-column
+        // layouts, then let Layout handle it as a fullscreen push.
         if let CommandResult::View(view) = result {
-            return match self.push_to_pane("tracks", view) {
+            let mut returned = self.push_to_pane("tracks", view);
+            if let Some(v) = returned {
+                returned = self.push_to_pane("browser", v);
+            }
+            return match returned {
                 None => Ok(CommandResult::Consumed(None)),
-                // No tracks pane configured; let Layout handle it as usual.
                 Some(view) => Ok(CommandResult::View(view)),
             };
         }

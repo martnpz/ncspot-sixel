@@ -13,6 +13,7 @@ use signal_hook::{consts::SIGHUP, consts::SIGTERM, iterator::Signals};
 use crate::command::Command;
 use crate::commands::CommandManager;
 use crate::config::{Config, PlaybackState};
+use crate::traits::ListItem;
 use crate::events::{Event, EventManager};
 use crate::library::Library;
 use crate::queue::Queue;
@@ -76,6 +77,8 @@ pub struct Application {
     ipc: Option<IpcSocket>,
     /// The object to render to the terminal.
     cursive: CursiveRunner<Cursive>,
+    library: Arc<Library>,
+    configuration: Arc<Config>,
 }
 
 impl Application {
@@ -351,6 +354,8 @@ impl Application {
             #[cfg(unix)]
             ipc,
             cursive,
+            library,
+            configuration,
         })
     }
 
@@ -399,6 +404,35 @@ impl Application {
                             &self.event_manager,
                             &playable,
                         );
+                    }
+                    Event::LibraryLoaded => {
+                        let last = self.configuration.state().last_opened.clone();
+                        if let Some(item) = last {
+                            let view = match item.kind.as_str() {
+                                "playlist" => self
+                                    .library
+                                    .playlists
+                                    .read()
+                                    .unwrap()
+                                    .iter()
+                                    .find(|p| p.id == item.id)
+                                    .cloned()
+                                    .and_then(|p| p.open(self.queue.clone(), self.library.clone())),
+                                "album" => self
+                                    .library
+                                    .albums
+                                    .read()
+                                    .unwrap()
+                                    .iter()
+                                    .find(|a| a.id.as_deref() == Some(item.id.as_str()))
+                                    .cloned()
+                                    .and_then(|a| a.open(self.queue.clone(), self.library.clone())),
+                                _ => None,
+                            };
+                            if let Some(view) = view {
+                                ui::panes::show_view(&mut self.cursive, view);
+                            }
+                        }
                     }
                     Event::SessionDied => {
                         if self.spotify.start_worker(None).is_err() {

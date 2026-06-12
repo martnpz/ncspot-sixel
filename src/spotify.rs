@@ -193,12 +193,9 @@ impl Spotify {
             .map(|_| session)
     }
 
-    /// Create a [Session] that respects the user configuration in `cfg` and with the given
-    /// credentials.
-    async fn create_session(
-        cfg: &config::Config,
-        credentials: Credentials,
-    ) -> Result<Session, librespot_core::Error> {
+    /// Build a [Session] configured from `cfg`. Does NOT authenticate — the
+    /// caller (or Spirc) is responsible for calling `session.connect()`.
+    fn build_session(cfg: &config::Config) -> Session {
         let librespot_cache_path = config::cache_path("librespot");
         let audio_cache_path = match cfg.values().audio_cache {
             Some(false) => None,
@@ -215,8 +212,7 @@ impl Spotify {
         .expect("Could not create cache");
         debug!("opening spotify session");
         let session_config = Self::session_config(cfg);
-        let session = Session::new(session_config, Some(cache));
-        session.connect(credentials, true).await.map(|_| session)
+        Session::new(session_config, Some(cache))
     }
 
     /// Create and initialize the requested audio backend.
@@ -297,11 +293,12 @@ impl Spotify {
             ..Default::default()
         };
 
-        let session = Self::create_session(&cfg, credentials)
-            .await
-            .expect("Could not create session");
+        // Build the session without connecting yet — Spirc must register its
+        // dealer listeners before session.connect() fires the connection-id
+        // message. Connecting too early means Spirc misses that message and
+        // never registers the device with Spotify Connect.
+        let session = Self::build_session(&cfg);
         *session_handle.write().unwrap() = Some(session.clone());
-        user_tx.map(|tx| tx.send(session.username()));
 
         let mixer_factory_opt = librespot_playback::mixer::find(Some(SoftMixer::NAME));
         let factory = mixer_factory_opt.expect("could not find softvol mixer factory");
@@ -310,13 +307,49 @@ impl Spotify {
         mixer.set_volume(volume);
 
         let audio_format: librespot_playback::config::AudioFormat = Default::default();
+        let backend_device = cfg.values().backend_device.clone();
         let player = Player::new(
             player_config,
             session.clone(),
             mixer.get_soft_volume(),
-            move || (backend)(cfg.values().backend_device.clone(), audio_format),
+            move || (backend)(backend_device.clone(), audio_format),
         );
         let player_events = player.get_player_event_channel();
+
+        // Spirc::new registers dealer listeners then calls session.connect()
+        // in the correct order, making this device visible via the Spotify API
+        // (enables Last.fm via Spotify, Discord Rich Presence, activity feeds).
+        let connect_config = librespot_connect::ConnectConfig {
+            name: cfg.values().device_name.clone().unwrap_or_else(|| "ncspot".to_string()),
+            device_type: librespot_core::config::DeviceType::Computer,
+            initial_volume: volume,
+            ..Default::default()
+        };
+        let _spirc = match librespot_connect::Spirc::new(
+            connect_config,
+            session.clone(),
+            credentials.clone(),
+            player.clone(),
+            mixer.clone(),
+        )
+        .await
+        {
+            Ok((spirc, spirc_task)) => {
+                tokio::spawn(spirc_task);
+                info!("Spotify Connect active");
+                Some(spirc)
+            }
+            Err(e) => {
+                error!("Could not initialize Spotify Connect: {e}");
+                if let Err(e2) = session.connect(credentials, true).await {
+                    error!("Session connect fallback also failed: {e2}");
+                }
+                None
+            }
+        };
+
+        // Session is now authenticated (by Spirc or the fallback above).
+        user_tx.map(|tx| tx.send(session.username()));
 
         let mut worker = Worker::new(
             events.clone(),

@@ -239,6 +239,14 @@ impl ListItem for Album {
     }
 
     fn open(&self, queue: Arc<Queue>, library: Arc<Library>) -> Option<Box<dyn ViewExt>> {
+        if let Some(ref id) = self.id {
+            library.cfg.with_state_mut(|state| {
+                state.last_opened = Some(crate::config::LastOpenedItem {
+                    kind: "album".to_string(),
+                    id: id.clone(),
+                });
+            });
+        }
         let mut album = self.clone();
         album.load_all_tracks(queue.get_spotify());
         let tracks: Vec<Playable> = album
