@@ -1,7 +1,9 @@
 use std::sync::{Arc, RwLock};
 
-use cursive::event::{Event, EventResult, MouseEvent};
+use cursive::event::{Event, EventResult, Key, MouseEvent};
 use cursive::theme::{ColorStyle, ColorType, Effect, PaletteColor, Style};
+use cursive::view::Position;
+use cursive::views::{Layer, OnEventView, SelectView};
 use cursive::{Cursive, Printer, Vec2, View};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -9,12 +11,30 @@ use crate::command::{Command, MoveAmount, MoveMode};
 use crate::commands::CommandResult;
 use crate::config::{Config, IconKind, LyricsAlign};
 use crate::lyrics::{LyricsManager, LyricsStatus};
+use crate::model::playable::Playable;
 use crate::queue::Queue;
 use crate::spotify::Spotify;
 use crate::traits::ViewExt;
+use crate::ui::browser::DropdownBorder;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LyricsSection {
+    Lyrics,
+    Queue,
+}
+
+impl LyricsSection {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Lyrics => "Lyrics",
+            Self::Queue => "Queue",
+        }
+    }
+}
 
 /// Screen that shows the lyrics for the currently playing track, following
-/// playback when the lyrics are time-synced.
+/// playback when the lyrics are time-synced. Its title is a dropdown that
+/// switches between the Lyrics and Queue sections.
 pub struct LyricsView {
     queue: Arc<Queue>,
     spotify: Spotify,
@@ -25,6 +45,10 @@ pub struct LyricsView {
     /// Whether the view auto-follows the currently sung line.
     follow: RwLock<bool>,
     last_size: RwLock<Vec2>,
+    section: LyricsSection,
+    /// Absolute screen offset of the content area; captured during draw for dropdown anchoring.
+    last_offset: RwLock<Vec2>,
+    last_content_w: RwLock<usize>,
 }
 
 impl LyricsView {
@@ -42,7 +66,14 @@ impl LyricsView {
             scroll: RwLock::new(0),
             follow: RwLock::new(true),
             last_size: RwLock::new(Vec2::zero()),
+            section: LyricsSection::Lyrics,
+            last_offset: RwLock::new(Vec2::zero()),
+            last_content_w: RwLock::new(0),
         }
+    }
+
+    fn set_section(&mut self, section: LyricsSection) {
+        self.section = section;
     }
 
     /// All lines to display, plus the index of the currently sung line for
@@ -115,6 +146,162 @@ impl LyricsView {
         *scroll = scroll.saturating_add_signed(delta as isize).min(max_top);
         *self.follow.write().unwrap() = false;
     }
+
+    fn open_dropdown(&self) -> EventResult {
+        let offset = *self.last_offset.read().unwrap();
+        let content_w = *self.last_content_w.read().unwrap();
+        let current = self.section;
+
+        // Mirror the draw_island centering formula used in panes.rs.
+        let title_padded_w = current.label().width() + 4;
+        let left_fill = content_w.saturating_sub(title_padded_w) / 2;
+        let anchor = Vec2::new(offset.x + left_fill, offset.y);
+
+        EventResult::with_cb(move |s: &mut Cursive| {
+            let mut select = SelectView::<LyricsSection>::new();
+            for &section in &[LyricsSection::Lyrics, LyricsSection::Queue] {
+                select.add_item(format!(" {} ", section.label()), section);
+            }
+            if let Some(idx) = [LyricsSection::Lyrics, LyricsSection::Queue]
+                .iter()
+                .position(|&s| s == current)
+            {
+                select.set_selection(idx);
+            }
+            select.set_on_submit(|s: &mut Cursive, section: &LyricsSection| {
+                let section = *section;
+                s.pop_layer();
+                s.call_on_name("lyrics_pane", move |view: &mut LyricsView| {
+                    view.set_section(section);
+                });
+            });
+
+            let menu = OnEventView::new(DropdownBorder::new(Layer::new(select)))
+                .on_event(Key::Esc, |s| {
+                    s.pop_layer();
+                })
+                .on_event(Event::Char('q'), |s| {
+                    s.pop_layer();
+                });
+            s.screen_mut()
+                .add_layer_at(Position::absolute(anchor), menu);
+        })
+    }
+
+    fn draw_lyrics(&self, printer: &Printer) {
+        let height = printer.size.y;
+        let align = self.align();
+
+        let icon = self.cfg.icon(IconKind::LyricsCurrent);
+        let gutter = icon.width();
+        let wrap_width = printer.size.x.saturating_sub(gutter).max(1);
+
+        let (rows, current, current_center_row) = self.display_rows(wrap_width);
+        let gutter = if current.is_some() { gutter } else { 0 };
+
+        let top = if *self.follow.read().unwrap() {
+            current_center_row.unwrap_or(0).saturating_sub(height / 2)
+        } else {
+            *self.scroll.read().unwrap()
+        };
+
+        let current_style = Style::from(ColorStyle::new(
+            ColorType::Color(*printer.theme.palette.custom("playing").unwrap()),
+            ColorType::Color(*printer.theme.palette.custom("playing_bg").unwrap()),
+        ))
+        .combine(Effect::Bold);
+        let past_style = Style::from(ColorStyle::new(
+            ColorType::Palette(PaletteColor::Primary),
+            ColorType::Palette(PaletteColor::Primary),
+        ))
+        .combine(Effect::Dim);
+        let upcoming_style = Style::from(ColorStyle::new(
+            ColorType::Palette(PaletteColor::Background),
+            ColorType::Palette(PaletteColor::Background),
+        ));
+
+        for (row, display_row) in rows.iter().skip(top).take(height).enumerate() {
+            let x = match align {
+                LyricsAlign::Left => gutter,
+                LyricsAlign::Center => {
+                    ((printer.size.x.saturating_sub(display_row.text.width())) / 2).max(gutter)
+                }
+                LyricsAlign::Right => printer
+                    .size
+                    .x
+                    .saturating_sub(display_row.text.width())
+                    .max(gutter),
+            };
+
+            let style = match current {
+                Some(current) if display_row.logical == current => current_style,
+                Some(current) if display_row.logical > current => upcoming_style,
+                Some(_) | None => past_style,
+            };
+
+            printer.with_style(style, |printer| {
+                if display_row.first && current == Some(display_row.logical) {
+                    printer.print((0, row), &icon);
+                }
+                printer.print((x, row), &display_row.text);
+            });
+        }
+    }
+
+    fn draw_queue(&self, printer: &Printer) {
+        let queue = self.queue.queue.read().unwrap();
+        let current = self.queue.get_current_index();
+
+        let start = current.map(|i| i + 1).unwrap_or(0);
+        let items: Vec<&Playable> = queue.iter().skip(start).collect();
+
+        if items.is_empty() {
+            printer.with_color(ColorStyle::secondary(), |p| {
+                let text = "Nothing coming up";
+                let x = p.size.x.saturating_sub(text.width()) / 2;
+                p.print((x, p.size.y / 2), text);
+            });
+            return;
+        }
+
+        for (row, item) in items.iter().enumerate() {
+            if row >= printer.size.y {
+                break;
+            }
+
+            let name = match item {
+                Playable::Track(t) => {
+                    if t.artists.is_empty() {
+                        t.title.clone()
+                    } else {
+                        format!("{} - {}", t.artists.join(", "), t.title)
+                    }
+                }
+                Playable::Episode(e) => e.name.clone(),
+            };
+            let duration = item.duration_str();
+            let dur_w = duration.width();
+
+            // Truncate name to leave room for " duration" on the right.
+            let max_name_w = printer.size.x.saturating_sub(dur_w + 1);
+            let mut name_w = 0usize;
+            let mut truncated = String::new();
+            for c in name.chars() {
+                let cw = c.width().unwrap_or(0);
+                if name_w + cw > max_name_w {
+                    break;
+                }
+                name_w += cw;
+                truncated.push(c);
+            }
+
+            printer.print((0, row), &truncated);
+            let x = printer.size.x.saturating_sub(dur_w);
+            printer.with_color(ColorStyle::secondary(), |p| {
+                p.print((x, row), &duration);
+            });
+        }
+    }
 }
 
 struct DisplayRow {
@@ -164,67 +351,12 @@ fn wrap_line(line: &str, width: usize) -> Vec<String> {
 
 impl View for LyricsView {
     fn draw(&self, printer: &Printer) {
-        let height = printer.size.y;
-        let align = self.align();
+        *self.last_offset.write().unwrap() = printer.offset;
+        *self.last_content_w.write().unwrap() = printer.size.x;
 
-        // Gutter on the left side for the current-line marker. Probe with
-        // the icon first so the wrap width accounts for it.
-        let icon = self.cfg.icon(IconKind::LyricsCurrent);
-        let gutter = icon.width();
-        let wrap_width = printer.size.x.saturating_sub(gutter).max(1);
-
-        let (rows, current, current_center_row) = self.display_rows(wrap_width);
-        let gutter = if current.is_some() { gutter } else { 0 };
-
-        // Keep the current line vertically centered, even near the end of
-        // the lyrics (the text simply keeps scrolling up).
-        let top = if *self.follow.read().unwrap() {
-            current_center_row.unwrap_or(0).saturating_sub(height / 2)
-        } else {
-            *self.scroll.read().unwrap()
-        };
-
-        let current_style = Style::from(ColorStyle::new(
-            ColorType::Color(*printer.theme.palette.custom("playing").unwrap()),
-            ColorType::Color(*printer.theme.palette.custom("playing_bg").unwrap()),
-        ))
-        .combine(Effect::Bold);
-        let past_style = Style::from(ColorStyle::new(
-            ColorType::Palette(PaletteColor::Primary),
-            ColorType::Palette(PaletteColor::Primary),
-        ))
-        .combine(Effect::Dim);
-        // "Shadow" style for the lines that haven't been sung yet.
-        let upcoming_style = Style::from(ColorStyle::new(
-            ColorType::Palette(PaletteColor::Background),
-            ColorType::Palette(PaletteColor::Background),
-        ));
-
-        for (row, display_row) in rows.iter().skip(top).take(height).enumerate() {
-            let x = match align {
-                LyricsAlign::Left => gutter,
-                LyricsAlign::Center => {
-                    ((printer.size.x.saturating_sub(display_row.text.width())) / 2).max(gutter)
-                }
-                LyricsAlign::Right => printer
-                    .size
-                    .x
-                    .saturating_sub(display_row.text.width())
-                    .max(gutter),
-            };
-
-            let style = match current {
-                Some(current) if display_row.logical == current => current_style,
-                Some(current) if display_row.logical > current => upcoming_style,
-                Some(_) | None => past_style,
-            };
-
-            printer.with_style(style, |printer| {
-                if display_row.first && current == Some(display_row.logical) {
-                    printer.print((0, row), &icon);
-                }
-                printer.print((x, row), &display_row.text);
-            });
+        match self.section {
+            LyricsSection::Lyrics => self.draw_lyrics(printer),
+            LyricsSection::Queue => self.draw_queue(printer),
         }
     }
 
@@ -237,6 +369,9 @@ impl View for LyricsView {
     }
 
     fn on_event(&mut self, event: Event) -> EventResult {
+        if self.section == LyricsSection::Queue {
+            return EventResult::Ignored;
+        }
         match event {
             Event::Mouse {
                 event: MouseEvent::WheelUp,
@@ -259,10 +394,21 @@ impl View for LyricsView {
 
 impl ViewExt for LyricsView {
     fn title(&self) -> String {
-        "Lyrics".to_string()
+        self.section.label().to_string()
+    }
+
+    fn has_title_action(&self) -> bool {
+        true
+    }
+
+    fn on_title_action(&mut self) -> EventResult {
+        self.open_dropdown()
     }
 
     fn on_command(&mut self, _s: &mut Cursive, cmd: &Command) -> Result<CommandResult, String> {
+        if self.section == LyricsSection::Queue {
+            return Ok(CommandResult::Ignored);
+        }
         match cmd {
             Command::Move(mode, amount) => {
                 let delta = match amount {

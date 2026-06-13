@@ -93,6 +93,10 @@ default_section = "playlists"
 # "default" keeps Spotify's natural order; "name" sorts alphabetically
 # (snapshot at startup).
 sort = "default"
+# Cover-art thumbnails for playlists and albums. Row height in cells;
+# 1 disables thumbnails. Requires a sixel-capable terminal.
+row_height = 2
+thumbnails = true
 
 [layout.tracks]
 # Track row height in cells; 1 disables thumbnails.
@@ -155,6 +159,8 @@ align = "center"
 #updating = "[U] "
 #lyrics_current = "♪ "
 #filter = "> "       # icon shown in the track-list filter input row
+#pane_back = "< "    # prefix shown in pane title when the view stack has depth > 1
+#pane_menu = " ▾"    # suffix shown in pane title when the view has a dropdown action
 
 ###############################################################################
 # Keybindings

@@ -155,6 +155,8 @@ pub struct IconsConfig {
     pub updating: Option<String>,
     pub lyrics_current: Option<String>,
     pub filter: Option<String>,
+    pub pane_back: Option<String>,
+    pub pane_menu: Option<String>,
 }
 
 /// The icons that can be customized through [IconsConfig].
@@ -172,6 +174,10 @@ pub enum IconKind {
     LyricsCurrent,
     /// Icon shown at the start of the filter/search input row in the track list.
     Filter,
+    /// Prefix shown in a pane title when a previous view can be popped (back navigation).
+    PaneBack,
+    /// Suffix shown in a pane title when the view has a dropdown menu.
+    PaneMenu,
 }
 
 impl IconKind {
@@ -188,6 +194,8 @@ impl IconKind {
             Self::Updating => ("\u{f04e6} ", "[U] "),
             Self::LyricsCurrent => ("\u{f075a} ", "♪ "),
             Self::Filter => ("\u{f002} ", "/ "),
+            Self::PaneBack => ("\u{f0141} ", "< "),
+            Self::PaneMenu => (" \u{f0140}", " ▾"),
         }
     }
 }
@@ -228,6 +236,12 @@ pub struct BrowserConfig {
     pub default_section: Option<String>,
     /// Sorting of section lists: "default" (Spotify order) or "name".
     pub sort: Option<String>,
+    /// Height of each row in the playlist/album lists, in cells.
+    /// 1 disables thumbnails. Default 2.
+    pub row_height: Option<u8>,
+    /// Show cover-art thumbnails in the playlist and album lists (requires
+    /// sixel support). Default true.
+    pub thumbnails: Option<bool>,
 }
 
 /// Options for the tracks pane (`[layout.tracks]`).
@@ -465,6 +479,8 @@ impl Config {
                 IconKind::Updating => &icons.updating,
                 IconKind::LyricsCurrent => &icons.lyrics_current,
                 IconKind::Filter => &icons.filter,
+                IconKind::PaneBack => &icons.pane_back,
+                IconKind::PaneMenu => &icons.pane_menu,
             }
             .clone()
         });

@@ -26,6 +26,7 @@ pub struct Playlist {
     pub num_tracks: usize,
     pub tracks: Option<Vec<Playable>>,
     pub collaborative: bool,
+    pub cover_url: Option<String>,
 }
 
 impl Playlist {
@@ -117,6 +118,7 @@ impl From<&SimplifiedPlaylist> for Playlist {
             num_tracks: list.items.total as usize,
             tracks: None,
             collaborative: list.collaborative,
+            cover_url: list.images.first().map(|i| i.url.clone()),
         }
     }
 }
@@ -132,6 +134,7 @@ impl From<&FullPlaylist> for Playlist {
             num_tracks: list.items.total as usize,
             tracks: None,
             collaborative: list.collaborative,
+            cover_url: list.images.first().map(|i| i.url.clone()),
         }
     }
 }
@@ -151,6 +154,10 @@ impl ListItem for Playlist {
         } else {
             false
         }
+    }
+
+    fn cover_url(&self) -> Option<String> {
+        self.cover_url.clone()
     }
 
     fn display_left(&self, library: &Library) -> String {

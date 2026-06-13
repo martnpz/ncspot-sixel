@@ -59,6 +59,10 @@ pub trait ListItem: Sync + Send + 'static {
         false
     }
 
+    fn cover_url(&self) -> Option<String> {
+        None
+    }
+
     fn as_listitem(&self) -> Box<dyn ListItem>;
 }
 
@@ -73,8 +77,18 @@ pub trait ViewExt: View {
 
     fn on_leave(&self) {}
 
+    /// Called when this view becomes the top of the pane stack again after
+    /// another view was popped from above it.
+    fn on_resume(&self) {}
+
     fn on_command(&mut self, _s: &mut Cursive, _cmd: &Command) -> Result<CommandResult, String> {
         Ok(CommandResult::Ignored)
+    }
+
+    /// Returns true if this view's title click opens a dropdown or similar
+    /// action. Used by the pane layout to show a menu indicator icon.
+    fn has_title_action(&self) -> bool {
+        false
     }
 
     /// Invoked when the user clicks the pane title of this view in the pane
@@ -97,8 +111,16 @@ impl<V: ViewExt> ViewExt for NamedView<V> {
         self.with_view(|v| v.on_leave());
     }
 
+    fn on_resume(&self) {
+        self.with_view(|v| v.on_resume());
+    }
+
     fn on_command(&mut self, s: &mut Cursive, cmd: &Command) -> Result<CommandResult, String> {
         self.with_view_mut(move |v| v.on_command(s, cmd)).unwrap()
+    }
+
+    fn has_title_action(&self) -> bool {
+        self.with_view(|v| v.has_title_action()).unwrap_or(false)
     }
 
     fn on_title_action(&mut self) -> cursive::event::EventResult {
@@ -186,6 +208,10 @@ impl ViewExt for BoxedViewExt {
 
     fn on_leave(&self) {
         self.boxed_view.on_leave();
+    }
+
+    fn on_resume(&self) {
+        self.boxed_view.on_resume();
     }
 
     fn on_command(&mut self, s: &mut Cursive, cmd: &Command) -> Result<CommandResult, String> {

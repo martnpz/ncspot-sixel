@@ -13,6 +13,8 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::command::{Command, GotoMode, InsertSource, JumpMode, MoveAmount, MoveMode, TargetMode};
 use crate::commands::CommandResult;
+use crate::config::Config;
+use crate::events::EventManager;
 use crate::library::Library;
 use crate::model::album::Album;
 use crate::model::artist::Artist;
@@ -30,6 +32,30 @@ use crate::ui::album::AlbumView;
 use crate::ui::artist::ArtistView;
 use crate::ui::contextmenu::ContextMenu;
 use crate::ui::pagination::Pagination;
+
+#[cfg(feature = "cover")]
+use crate::ui::cover::sixel::SixelImageCache;
+
+#[cfg(feature = "cover")]
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+enum SlotImage {
+    #[default]
+    Empty,
+    /// Sixel was emitted on the first frame after invalidation but the
+    /// crossterm diff for that frame may have overwritten it (stale shadow
+    /// buffer).  A second frame is scheduled; that frame finds an empty diff
+    /// and the emission sticks, after which the state advances to Image.
+    Pending,
+    Blank,
+    Image(String),
+}
+
+#[cfg(feature = "cover")]
+#[derive(Clone, Default)]
+struct SlotState {
+    image: SlotImage,
+    position: Vec2,
+}
 
 pub enum MouseHandleResult {
     Handled(EventResult),
@@ -49,6 +75,13 @@ pub struct ListView<I: ListItem> {
     library: Arc<Library>,
     pagination: Pagination<I>,
     title: String,
+    cfg: Option<Arc<Config>>,
+    #[cfg(feature = "cover")]
+    images: Option<Arc<SixelImageCache>>,
+    #[cfg(feature = "cover")]
+    events: Option<EventManager>,
+    #[cfg(feature = "cover")]
+    slots: RwLock<Vec<SlotState>>,
 }
 
 impl<I: ListItem> Scroller for ListView<I> {
@@ -76,6 +109,13 @@ impl<I: ListItem + Clone> ListView<I> {
             library,
             pagination: Pagination::default(),
             title: "".to_string(),
+            cfg: None,
+            #[cfg(feature = "cover")]
+            images: None,
+            #[cfg(feature = "cover")]
+            events: None,
+            #[cfg(feature = "cover")]
+            slots: RwLock::new(Vec::new()),
         };
         result.try_paginate();
         result
@@ -84,6 +124,120 @@ impl<I: ListItem + Clone> ListView<I> {
     pub fn with_title(mut self, title: &str) -> Self {
         self.title = title.to_string();
         self
+    }
+
+    /// Clear the slot cache without erasing terminal content.
+    /// Call this when another view has drawn over this view's terminal area
+    /// (e.g. a browser section switch), so the next draw re-emits all sixels.
+    #[cfg(feature = "cover")]
+    pub fn invalidate_slots(&self) {
+        self.slots.write().unwrap().clear();
+    }
+
+    /// Enable cover thumbnails. `cfg` supplies the `[layout.browser]` config;
+    /// `images` is the shared sixel cache (None when sixel is unavailable).
+    /// `events` is used to schedule a second draw frame after the first frame
+    /// clears any stale shadow-buffer content in the thumbnail columns.
+    #[cfg(feature = "cover")]
+    pub fn with_thumbnails(
+        mut self,
+        cfg: Arc<Config>,
+        images: Option<Arc<SixelImageCache>>,
+        events: EventManager,
+    ) -> Self {
+        self.cfg = Some(cfg);
+        self.images = images;
+        self.events = Some(events);
+        self
+    }
+
+    fn browser_config<T>(&self, get: impl Fn(&crate::config::BrowserConfig) -> Option<T>) -> Option<T> {
+        self.cfg.as_ref()?.values().layout.as_ref()?.browser.as_ref().and_then(get)
+    }
+
+    fn row_height(&self) -> usize {
+        #[cfg(feature = "cover")]
+        if self.images.is_some() {
+            return self.browser_config(|b| b.row_height).unwrap_or(2).max(1) as usize;
+        }
+        1
+    }
+
+    fn thumb_columns(&self, cell_px: Vec2) -> usize {
+        #[cfg(feature = "cover")]
+        {
+            let enabled = self.browser_config(|b| b.thumbnails).unwrap_or(true);
+            if enabled && self.images.is_some() && self.row_height() >= 2 {
+                let side_px = self.row_height() * cell_px.y;
+                return side_px.div_ceil(cell_px.x.max(1));
+            }
+        }
+        let _ = cell_px;
+        0
+    }
+
+    #[cfg(feature = "cover")]
+    fn draw_thumbnail(&self, slot: usize, desired: SlotImage, position: Vec2, side_px: usize) {
+        let Some(images) = &self.images else { return };
+        let mut slots = self.slots.write().unwrap();
+        if slots.len() <= slot {
+            slots.resize(slot + 1, SlotState::default());
+        }
+        let state = &mut slots[slot];
+        if state.image == desired && state.position == position {
+            return;
+        }
+        let sixel = match &desired {
+            SlotImage::Image(url) => images.get(url, side_px, side_px),
+            // Pending is only set internally; it is never passed as desired.
+            SlotImage::Blank | SlotImage::Empty | SlotImage::Pending => {
+                if state.image == SlotImage::Empty && state.position == position {
+                    return;
+                }
+                images.blank(side_px, side_px)
+            }
+        };
+        match sixel {
+            Some(sixel) => {
+                if crate::ui::cover::sixel::emit(&sixel, position).is_ok() {
+                    if state.image == SlotImage::Pending {
+                        // Second frame: the crossterm diff for the thumbnail
+                        // columns is now empty (same spaces as last frame), so
+                        // this emission sticks.  Advance to the final state.
+                        state.image = desired;
+                        state.position = position;
+                    } else {
+                        // First emission for this slot (any prior state:
+                        // Empty after invalidation, Blank after encoding,
+                        // Image after a position change on resize, …).
+                        // The crossterm diff for this frame may carry stale
+                        // cell content for the thumbnail columns (full redraw
+                        // on resize, section switch from a non-thumbnail
+                        // section, etc.) and will arrive AFTER our /dev/tty
+                        // write, overwriting the sixel.  Schedule a second
+                        // frame; that frame's diff will be empty for these
+                        // columns and the sixel will stick.
+                        state.image = SlotImage::Pending;
+                        state.position = position;
+                        if let Some(ev) = &self.events {
+                            ev.trigger();
+                        }
+                    }
+                }
+            }
+            None => {
+                // Emit a blank while the image is encoding so the previous
+                // section's sixel doesn't bleed through. Skip only if we
+                // already blanked this slot at this position.
+                if !matches!(state.image, SlotImage::Blank)
+                    && let Some(blank) = images.blank(side_px, side_px)
+                    && crate::ui::cover::sixel::emit(&blank, position).is_ok()
+                {
+                    state.image = SlotImage::Blank;
+                    state.position = position;
+                }
+            }
+        }
     }
 
     pub fn get_pagination(&self) -> &Pagination<I> {
@@ -155,7 +309,7 @@ impl<I: ListItem + Clone> ListView<I> {
     pub fn move_focus_to(&mut self, target: usize) {
         let len = self.content_len(false).saturating_sub(1);
         self.selected = min(target, len);
-        self.scroller.scroll_to_y(self.selected);
+        self.scroller.scroll_to_y(self.selected * self.row_height());
     }
 
     pub fn move_focus(&mut self, delta: i32) {
@@ -194,9 +348,11 @@ impl<I: ListItem + Clone> ListView<I> {
 
     /// Get the selected row from a mouse position and offset
     fn get_selected_row(&self, position: XY<usize>, offset: XY<usize>) -> Option<usize> {
+        let rh = self.row_height();
         let viewport = self.scroller.content_viewport().top_left();
-        let selected_row = position.checked_sub(offset).map(|p| p.y + viewport.y);
-        selected_row.filter(|row| *row < self.content_len(false))
+        let row = position.checked_sub(offset).map(|p| p.y + viewport.y)?;
+        let item = row / rh;
+        (item < self.content_len(false)).then_some(item)
     }
 
     fn run_play_command(&mut self) {
@@ -322,138 +478,218 @@ impl<I: ListItem + Clone> ListView<I> {
 
 impl<I: ListItem + Clone> View for ListView<I> {
     fn draw(&self, printer: &Printer<'_, '_>) {
-        let content = self.content.read().unwrap();
+        #[cfg(feature = "cover")]
+        let cell_px =
+            crate::ui::cover::cell_size_px(self.cfg.as_ref().and_then(|c| c.values().cover_max_scale).unwrap_or(1.0));
+        #[cfg(not(feature = "cover"))]
+        let cell_px = Vec2::new(8, 16);
+        let thumb_cols = self.thumb_columns(cell_px);
+        let text_x = if thumb_cols > 0 { thumb_cols + 1 } else { 0 };
+
+        // Explicitly fill thumbnail columns with a stable background style so
+        // the shadow-buffer cells for those columns are identical every frame.
+        // Without this the cells rely on the pane wipe's default style, which
+        // can vary (e.g. focused/unfocused); a style difference between frame 1
+        // (first emission) and frame 2 (Pending re-emission) would produce a
+        // non-empty crossterm diff that overwrites the sixel on frame 2.
+        // CoverView does the same — that's why it survived resize already.
+        #[cfg(feature = "cover")]
+        if thumb_cols > 0 {
+            let bg = ColorStyle::new(
+                ColorType::Palette(PaletteColor::Background),
+                ColorType::Palette(PaletteColor::Background),
+            );
+            printer.with_color(bg, |p| {
+                for y in 0..p.size.y {
+                    p.print_hline((0, y), thumb_cols, " ");
+                }
+            });
+        }
 
         scroll::draw_lines(self, printer, |_, printer, i| {
-            // draw paginator after content
-            if i == content.len() && self.can_paginate() {
-                let style = ColorStyle::secondary();
+            let rh = self.row_height();
+            let content = self.content.read().unwrap();
+            let item_count = content.len();
+            let item_rows = item_count * rh;
 
-                let max = self.pagination.max_content().unwrap();
-                let buf = format!("{} more items, scroll to load", max - i);
-                printer.with_color(style, |printer| {
-                    printer.print((0, 0), &buf);
-                });
-            } else if i < content.len() {
-                let item = &content[i];
-                let currently_playing =
-                    item.is_playing(&self.queue) && self.queue.get_current_index() == Some(i);
-                let is_local = item.track().map(|t| t.is_local).unwrap_or_default();
-                let is_playable = item.track().map(|t| t.is_playable).unwrap_or_default();
-
-                let style = if self.selected == i {
-                    if currently_playing {
-                        ColorStyle::new(
-                            *printer.theme.palette.custom("playing_selected").unwrap(),
-                            ColorType::Palette(PaletteColor::Highlight),
-                        )
-                    } else if is_local {
-                        ColorStyle::new(
-                            ColorType::Palette(PaletteColor::Secondary),
-                            ColorType::Palette(PaletteColor::Highlight),
-                        )
-                    } else {
-                        ColorStyle::highlight()
-                    }
-                } else if currently_playing {
-                    ColorStyle::new(
-                        ColorType::Color(*printer.theme.palette.custom("playing").unwrap()),
-                        ColorType::Color(*printer.theme.palette.custom("playing_bg").unwrap()),
-                    )
-                } else if is_local || is_playable == Some(false) {
-                    ColorStyle::secondary()
-                } else {
-                    ColorStyle::primary()
-                };
-
-                let left = item.display_left(&self.library);
-                let center = item.display_center(&self.library);
-                let right = item.display_right(&self.library);
-                let draw_center = !center.is_empty();
-
-                // draw left string
-                printer.with_color(style, |printer| {
-                    printer.print_hline((0, 0), printer.size.x, " ");
-                    printer.print((0, 0), &left);
-                });
-
-                // if line contains search query match, draw on top with
-                // highlight color
-                if self.search_indexes.contains(&i) {
-                    let fg = *printer.theme.palette.custom("search_match").unwrap();
-                    let matched_style = ColorStyle::new(fg, style.back);
-
-                    let matches: Vec<(usize, usize)> = left
-                        .to_lowercase()
-                        .match_indices(&self.search_query)
-                        .map(|i| (i.0, i.0 + i.1.len()))
-                        .collect();
-
-                    for m in matches {
-                        printer.with_color(matched_style, |printer| {
-                            printer.print((left[0..m.0].width(), 0), &left[m.0..m.1]);
-                        });
-                    }
+            // Paginator row — sits after all item rows.
+            if i >= item_rows {
+                if self.can_paginate() {
+                    let max = self.pagination.max_content().unwrap();
+                    let buf = format!("{} more items, scroll to load", max - item_count);
+                    printer.with_color(ColorStyle::secondary(), |p| p.print((0, 0), &buf));
                 }
+                return;
+            }
 
-                // left string cut off indicator
-                let center_offset = printer.size.x / 2;
-                let left_max_length = if draw_center {
-                    center_offset.saturating_sub(1)
+            let item_index = i / rh;
+            let row_within = i % rh;
+
+            if item_index >= item_count {
+                return;
+            }
+
+            let item = &content[item_index];
+            let currently_playing =
+                item.is_playing(&self.queue) && self.queue.get_current_index() == Some(item_index);
+            let is_local = item.track().map(|t| t.is_local).unwrap_or_default();
+            let is_playable = item.track().map(|t| t.is_playable).unwrap_or_default();
+
+            let style = if self.selected == item_index {
+                if currently_playing {
+                    ColorStyle::new(
+                        *printer.theme.palette.custom("playing_selected").unwrap(),
+                        ColorType::Palette(PaletteColor::Highlight),
+                    )
+                } else if is_local {
+                    ColorStyle::new(
+                        ColorType::Palette(PaletteColor::Secondary),
+                        ColorType::Palette(PaletteColor::Highlight),
+                    )
                 } else {
-                    printer.size.x.saturating_sub(right.width() + 1)
-                };
+                    ColorStyle::highlight()
+                }
+            } else if currently_playing {
+                ColorStyle::new(
+                    ColorType::Color(*printer.theme.palette.custom("playing").unwrap()),
+                    ColorType::Color(*printer.theme.palette.custom("playing_bg").unwrap()),
+                )
+            } else if is_local || is_playable == Some(false) {
+                ColorStyle::secondary()
+            } else {
+                ColorStyle::primary()
+            };
 
-                if left_max_length < left.width() {
-                    let offset = left_max_length.saturating_sub(1);
+            if row_within > 0 {
+                // Extra rows: fill text area with background, thumbnail fills the rest visually.
+                printer.with_color(style, |p| {
+                    p.print_hline((text_x, 0), p.size.x.saturating_sub(text_x), " ");
+                });
+                return;
+            }
+
+            // row_within == 0: draw text columns.
+            let left = item.display_left(&self.library);
+            let center = item.display_center(&self.library);
+            let right = item.display_right(&self.library);
+            let draw_center = !center.is_empty();
+            let avail_w = printer.size.x.saturating_sub(text_x);
+
+            // draw left string
+            printer.with_color(style, |printer| {
+                printer.print_hline((text_x, 0), avail_w, " ");
+                printer.print((text_x, 0), &left);
+            });
+
+            // search match highlight
+            if self.search_indexes.contains(&item_index) {
+                let fg = *printer.theme.palette.custom("search_match").unwrap();
+                let matched_style = ColorStyle::new(fg, style.back);
+                let matches: Vec<(usize, usize)> = left
+                    .to_lowercase()
+                    .match_indices(&self.search_query)
+                    .map(|m| (m.0, m.0 + m.1.len()))
+                    .collect();
+                for m in matches {
+                    printer.with_color(matched_style, |printer| {
+                        printer.print(
+                            (text_x + left[0..m.0].width(), 0),
+                            &left[m.0..m.1],
+                        );
+                    });
+                }
+            }
+
+            // left string cut-off indicator
+            let center_offset = text_x + avail_w / 2;
+            let left_max_length = if draw_center {
+                center_offset.saturating_sub(1)
+            } else {
+                printer.size.x.saturating_sub(right.width() + 1)
+            };
+            if left_max_length < text_x + left.width() {
+                let offset = left_max_length.saturating_sub(1);
+                printer.with_color(style, |printer| {
+                    printer.print_hline((offset, 0), printer.size.x, " ");
+                    printer.print((offset, 0), "..");
+                });
+            }
+
+            // center string
+            if draw_center {
+                printer.with_color(style, |printer| {
+                    printer.print((center_offset, 0), &center);
+                });
+                let max_length = printer.size.x.saturating_sub(right.width() + 1);
+                if max_length < center_offset + center.width() {
+                    let offset = max_length.saturating_sub(1);
                     printer.with_color(style, |printer| {
-                        printer.print_hline((offset, 0), printer.size.x, " ");
                         printer.print((offset, 0), "..");
                     });
                 }
+            }
 
-                // draw center string
-                if draw_center {
-                    printer.with_color(style, |printer| {
-                        printer.print((center_offset, 0), &center);
-                    });
+            // right string
+            let offset = HAlign::Right.get_offset(right.width(), printer.size.x);
+            printer.with_color(style, |printer| {
+                printer.print((offset, 0), &right);
+            });
 
-                    // center string cut off indicator
-                    let max_length = printer.size.x.saturating_sub(right.width() + 1);
-                    if max_length < center_offset + center.width() {
-                        let offset = max_length.saturating_sub(1);
-                        printer.with_color(style, |printer| {
-                            printer.print((offset, 0), "..");
-                        });
-                    }
-                }
-
-                // draw right string
-                let offset = HAlign::Right.get_offset(right.width(), printer.size.x);
-
-                printer.with_color(style, |printer| {
-                    printer.print((offset, 0), &right);
-                });
+            // Emit sixel thumbnail (out-of-band; spans all rows of this item).
+            #[cfg(feature = "cover")]
+            if thumb_cols > 0 {
+                let side_px = rh * cell_px.y;
+                let abs_position = printer.offset;
+                let desired = match item.cover_url() {
+                    Some(url) => SlotImage::Image(url),
+                    None => SlotImage::Blank,
+                };
+                self.draw_thumbnail(item_index, desired, abs_position, side_px);
             }
         });
     }
 
     fn layout(&mut self, size: Vec2) {
+        if size != self.last_size {
+            // Positions changed — force re-emission of all thumbnails.
+            #[cfg(feature = "cover")]
+            {
+                self.slots.write().unwrap().clear();
+                // Fire a second trigger so the resize always produces two
+                // draw frames (same as set_section does). One trigger comes
+                // from draw_thumbnail's first emission; this one is the
+                // belt-and-suspenders redundant trigger.
+                if let Some(ev) = &self.events {
+                    ev.trigger();
+                }
+            }
+        }
         self.last_size = size;
 
         let relayout_scroller = self.content_len(false) != self.last_content_len;
         self.last_content_len = self.content_len(true);
 
+        let rh = self.row_height();
         scroll::layout(
             self,
             size,
             relayout_scroller,
             |_, _| {},
-            |s, c| Vec2::new(c.x, s.content_len(true)),
+            |s, c| {
+                let item_rows = s.content.read().unwrap().len() * rh;
+                let total = item_rows + if s.can_paginate() { 1 } else { 0 };
+                Vec2::new(c.x, total)
+            },
         );
     }
 
     fn needs_relayout(&self) -> bool {
+        // Always redraw when thumbnails are enabled so that after on_leave()
+        // clears the slot cache, the very next frame re-emits all sixels.
+        #[cfg(feature = "cover")]
+        if self.images.is_some() {
+            return true;
+        }
         self.scroller.needs_relayout()
     }
 
@@ -486,6 +722,47 @@ impl<I: ListItem + Clone> View for ListView<I> {
 impl<I: ListItem + Clone> ViewExt for ListView<I> {
     fn title(&self) -> String {
         self.title.clone()
+    }
+
+    fn on_leave(&self) {
+        #[cfg(feature = "cover")]
+        {
+            use std::io::Write;
+            let cfg = match &self.cfg { Some(c) => c, None => return };
+            let cell_px =
+                crate::ui::cover::cell_size_px(cfg.values().cover_max_scale.unwrap_or(1.0));
+            let thumb_cols = self.thumb_columns(cell_px);
+            let rh = self.row_height();
+            if thumb_cols > 0 {
+                let positions: Vec<Vec2> = {
+                    let slots = self.slots.read().unwrap();
+                    slots
+                        .iter()
+                        .filter(|s| !matches!(s.image, SlotImage::Empty))
+                        .map(|s| s.position)
+                        .collect()
+                };
+                if !positions.is_empty() {
+                    let spaces = " ".repeat(thumb_cols);
+                    if let Ok(mut tty) = std::fs::OpenOptions::new().write(true).open("/dev/tty") {
+                        let mut out = Vec::new();
+                        out.extend_from_slice(b"\x1b[?2026h\x1b7");
+                        for pos in &positions {
+                            for r in 0..rh {
+                                let row = pos.y + r + 1;
+                                let col = pos.x + 1;
+                                out.extend_from_slice(
+                                    format!("\x1b[{row};{col}H{spaces}").as_bytes(),
+                                );
+                            }
+                        }
+                        out.extend_from_slice(b"\x1b8\x1b[?2026l");
+                        let _ = tty.write_all(&out);
+                    }
+                }
+                self.slots.write().unwrap().clear();
+            }
+        }
     }
 
     fn on_command(&mut self, _s: &mut Cursive, cmd: &Command) -> Result<CommandResult, String> {

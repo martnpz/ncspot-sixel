@@ -14,6 +14,7 @@ use log::{error, info};
 use crate::command::{Command, GotoMode};
 use crate::commands::CommandResult;
 use crate::config::Config;
+use crate::events::EventManager;
 use crate::library::Library;
 use crate::queue::Queue;
 use crate::traits::{IntoBoxedViewExt, ListItem, ViewExt};
@@ -78,7 +79,12 @@ pub struct CoverView {
     library: Arc<Library>,
     loading: Arc<RwLock<HashSet<String>>>,
     last_size: RwLock<Vec2>,
+    last_offset: RwLock<Vec2>,
     drawn_url: RwLock<Option<String>>,
+    /// True when the sixel was emitted on the first frame after a content
+    /// change and a second frame is pending to let the crossterm diff settle.
+    draw_pending: RwLock<bool>,
+    events: EventManager,
     backend: Box<dyn CoverBackend>,
     /// Maximum HiDPI scale correction from the config.
     scale: f32,
@@ -90,6 +96,7 @@ impl CoverView {
         library: Arc<Library>,
         config: &Config,
         images: Arc<sixel::SixelImageCache>,
+        events: EventManager,
     ) -> Self {
         let configured = config.values().cover_backend.clone();
         let backend: Box<dyn CoverBackend> = match configured.as_deref() {
@@ -114,9 +121,12 @@ impl CoverView {
             queue,
             library,
             backend,
+            events,
             loading: Arc::new(RwLock::new(HashSet::new())),
             last_size: RwLock::new(Vec2::new(0, 0)),
+            last_offset: RwLock::new(Vec2::zero()),
             drawn_url: RwLock::new(None),
+            draw_pending: RwLock::new(false),
             scale: config.values().cover_max_scale.unwrap_or(1.0),
         }
     }
@@ -132,14 +142,23 @@ impl CoverView {
             return;
         }
 
-        let needs_redraw = {
+        let content_changed = {
             let last_size = self.last_size.read().unwrap();
+            let last_off = self.last_offset.read().unwrap();
             let drawn_url = self.drawn_url.read().unwrap();
-            *last_size != draw_size || drawn_url.as_ref() != Some(&url)
+            *last_size != draw_size
+                || *last_off != draw_offset
+                || drawn_url.as_ref() != Some(&url)
         };
+        let is_pending = *self.draw_pending.read().unwrap();
 
-        if !needs_redraw {
+        if !content_changed && !is_pending {
             return;
+        }
+
+        // Content changed → reset Pending so the cycle restarts cleanly.
+        if content_changed && is_pending {
+            *self.draw_pending.write().unwrap() = false;
         }
 
         let path = match self.cache_path(url.clone()) {
@@ -152,11 +171,24 @@ impl CoverView {
             .draw(&url, &path, draw_offset, draw_size, self.font_size());
 
         if drawn {
-            let mut last_size = self.last_size.write().unwrap();
-            *last_size = draw_size;
+            *self.last_size.write().unwrap() = draw_size;
+            *self.last_offset.write().unwrap() = draw_offset;
+            *self.drawn_url.write().unwrap() = Some(url);
 
-            let mut drawn_url = self.drawn_url.write().unwrap();
-            *drawn_url = Some(url);
+            let mut pending = self.draw_pending.write().unwrap();
+            if *pending {
+                // Second frame: crossterm diff for this area is now empty,
+                // the sixel sticks.
+                *pending = false;
+            } else {
+                // First emission. The crossterm diff for this frame may carry
+                // stale cells (full redraw on resize, push/pop, section switch)
+                // and will arrive after our /dev/tty write, overwriting the
+                // sixel. Schedule a second frame; that frame's diff will be
+                // empty and the sixel will persist.
+                *pending = true;
+                self.events.trigger();
+            }
         }
     }
 
@@ -166,6 +198,7 @@ impl CoverView {
             return;
         }
         *drawn_url = None;
+        *self.draw_pending.write().unwrap() = false;
         self.backend.clear();
     }
 

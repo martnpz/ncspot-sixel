@@ -214,6 +214,7 @@ impl Application {
             library.clone(),
             &configuration,
             sixel_images.clone(),
+            event_manager.clone(),
         );
 
         let lyrics_manager = Arc::new(crate::lyrics::LyricsManager::new(
@@ -254,7 +255,7 @@ impl Application {
         }
 
         let layout_config = configuration.values().layout.clone().unwrap_or_default();
-        let panes_view = ui::panes::PaneLayoutView::new(&layout_config, |kind| {
+        let panes_view = ui::panes::PaneLayoutView::new(&layout_config, configuration.clone(), |kind| {
             use crate::traits::IntoBoxedViewExt;
             match kind {
                 "browser" => Some(
@@ -287,6 +288,7 @@ impl Application {
                         library.clone(),
                         &configuration,
                         sixel_images.clone(),
+                        event_manager.clone(),
                     )
                     .into_boxed_view_ext(),
                 ),
@@ -301,6 +303,7 @@ impl Application {
                             library.clone(),
                             &configuration,
                             sixel_images.clone(),
+                            event_manager.clone(),
                         ),
                     )
                     .into_boxed_view_ext(),
@@ -312,6 +315,7 @@ impl Application {
                         lyrics_manager.clone(),
                         configuration.clone(),
                     )
+                    .with_name("lyrics_pane")
                     .into_boxed_view_ext(),
                 ),
                 "queue" => Some(

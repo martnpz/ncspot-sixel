@@ -10,6 +10,7 @@ use cursive::theme::ColorStyle;
 use cursive::view::Position;
 use cursive::views::{Layer, OnEventView, SelectView};
 use cursive::{Cursive, Printer, Vec2, View};
+use unicode_width::UnicodeWidthStr;
 use log::error;
 
 use crate::command::{Command, TargetMode};
@@ -26,6 +27,72 @@ use crate::ui::tracklist::TrackListView;
 
 #[cfg(feature = "cover")]
 use crate::ui::cover::sixel::SixelImageCache;
+
+/// Thin wrapper that draws a rounded border (╭╮╰╯) around an inner view.
+pub(crate) struct DropdownBorder<V: View> {
+    inner: V,
+}
+
+impl<V: View> DropdownBorder<V> {
+    pub(crate) fn new(inner: V) -> Self {
+        Self { inner }
+    }
+}
+
+impl<V: View> View for DropdownBorder<V> {
+    fn draw(&self, printer: &Printer) {
+        let w = printer.size.x;
+        let h = printer.size.y;
+        if w < 2 || h < 2 {
+            self.inner.draw(printer);
+            return;
+        }
+        printer.with_color(ColorStyle::title_secondary(), |p| {
+            p.print((0, 0), &format!("╭{}╮", "─".repeat(w.saturating_sub(2))));
+            for y in 1..h.saturating_sub(1) {
+                p.print((0, y), "│");
+                p.print((w.saturating_sub(1), y), "│");
+            }
+            p.print((0, h.saturating_sub(1)), &format!("╰{}╯", "─".repeat(w.saturating_sub(2))));
+        });
+        self.inner.draw(
+            &printer
+                .offset((1, 1))
+                .cropped((w.saturating_sub(2), h.saturating_sub(2))),
+        );
+    }
+
+    fn layout(&mut self, size: Vec2) {
+        self.inner.layout(size.saturating_sub((2, 2)));
+    }
+
+    fn required_size(&mut self, constraint: Vec2) -> Vec2 {
+        self.inner.required_size(constraint.saturating_sub((2, 2))) + (2, 2)
+    }
+
+    fn on_event(&mut self, event: Event) -> EventResult {
+        // Shift mouse event offset inward by the border thickness so that
+        // the inner view computes local coordinates from its own top-left,
+        // not from the border's top-left.
+        let event = match event {
+            Event::Mouse { offset, position, event: mouse_event } => Event::Mouse {
+                offset: offset + Vec2::new(1, 1),
+                position,
+                event: mouse_event,
+            },
+            other => other,
+        };
+        self.inner.on_event(event)
+    }
+
+    fn needs_relayout(&self) -> bool {
+        self.inner.needs_relayout()
+    }
+
+    fn call_on_any(&mut self, sel: &cursive::view::Selector, cb: cursive::event::AnyCb) {
+        self.inner.call_on_any(sel, cb);
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BrowserSection {
@@ -92,9 +159,10 @@ pub struct BrowserView {
     search_input_active: bool,
     search_results: Option<SearchResultsView>,
 
-    /// Absolute screen offset of the pane content, captured during draw and
-    /// used to anchor the dropdown menu.
+    /// Absolute screen offset and content width of the pane, captured during
+    /// draw and used to anchor the dropdown menu below the centred title.
     last_offset: RwLock<Vec2>,
+    last_content_w: RwLock<usize>,
 }
 
 impl BrowserView {
@@ -174,9 +242,21 @@ impl BrowserView {
         )
         .with_title("Recommendations");
 
+        #[cfg(feature = "cover")]
+        let playlists_list = ListView::new(playlists_content.clone(), queue.clone(), library.clone())
+            .with_thumbnails(cfg.clone(), images.clone(), events.clone());
+        #[cfg(not(feature = "cover"))]
+        let playlists_list = ListView::new(playlists_content.clone(), queue.clone(), library.clone());
+
+        #[cfg(feature = "cover")]
+        let albums_list = ListView::new(albums_content.clone(), queue.clone(), library.clone())
+            .with_thumbnails(cfg.clone(), images.clone(), events.clone());
+        #[cfg(not(feature = "cover"))]
+        let albums_list = ListView::new(albums_content.clone(), queue.clone(), library.clone());
+
         Self {
-            playlists: ListView::new(playlists_content.clone(), queue.clone(), library.clone()),
-            albums: ListView::new(albums_content.clone(), queue.clone(), library.clone()),
+            playlists: playlists_list,
+            albums: albums_list,
             artists: ListView::new(artists_content.clone(), queue.clone(), library.clone()),
             playlists_content,
             albums_content,
@@ -188,6 +268,7 @@ impl BrowserView {
             search_input_active: false,
             search_results: None,
             last_offset: RwLock::new(Vec2::zero()),
+            last_content_w: RwLock::new(0),
             section,
             sections: sections.clone(),
             queue,
@@ -197,6 +278,14 @@ impl BrowserView {
     }
 
     pub fn set_section(&mut self, section: BrowserSection) {
+        // All section list views share the same terminal area. Invalidate
+        // their slot caches so the incoming section re-emits its sixels
+        // from scratch instead of skipping because a stale position matches.
+        #[cfg(feature = "cover")]
+        {
+            self.playlists.invalidate_slots();
+            self.albums.invalidate_slots();
+        }
         self.section = section;
         if section == BrowserSection::Search {
             self.search_input_active = true;
@@ -300,15 +389,39 @@ impl BrowserView {
     }
 
     fn open_dropdown(&self) -> EventResult {
-        // The dropdown opens right below the pane title, i.e. at the top of
-        // the pane content.
-        let anchor = *self.last_offset.read().unwrap();
+        let offset = *self.last_offset.read().unwrap();
+        let content_w = *self.last_content_w.read().unwrap();
+        let current = self.section;
         let sections = self.sections.clone();
+
+        // Mirror how draw_island centres the pane title so the dropdown
+        // opens directly below the title text.
+        //
+        // draw_island uses inner_w = pane_rect.width() - 2.  With padding=0
+        // the pane rect width is content_w + 2 (border), so inner_w = content_w.
+        // The padded title is " <label> ▾ " where " ▾" is the PaneMenu icon
+        // (2 display columns including its leading space).  That gives
+        // title_padded_w = 1 + label.width() + 2 + 1 = label.width() + 4.
+        // The same centering formula:
+        //   left_fill = (inner_w - title_padded_w) / 2
+        //   title_abs_x = island_tl.x + 1 + left_fill
+        //               = (offset.x - 1) + 1 + left_fill
+        //               = offset.x + left_fill
+        //
+        // The dropdown (including its own border) opens one row below the
+        // island border row, which is at offset.y.
+        let title_padded_w = current.label().width() + 4;
+        let left_fill = content_w.saturating_sub(title_padded_w) / 2;
+        let anchor = Vec2::new(offset.x + left_fill, offset.y);
 
         EventResult::with_cb(move |s: &mut Cursive| {
             let mut select = SelectView::<BrowserSection>::new();
             for section in &sections {
                 select.add_item(format!(" {} ", section.label()), *section);
+            }
+            // Pre-select the currently active section.
+            if let Some(idx) = sections.iter().position(|s| *s == current) {
+                select.set_selection(idx);
             }
             select.set_on_submit(|s: &mut Cursive, section: &BrowserSection| {
                 let section = *section;
@@ -318,7 +431,7 @@ impl BrowserView {
                 });
             });
 
-            let menu = OnEventView::new(Layer::new(select))
+            let menu = OnEventView::new(DropdownBorder::new(Layer::new(select)))
                 .on_event(Key::Esc, |s| {
                     s.pop_layer();
                 })
@@ -334,6 +447,7 @@ impl BrowserView {
 impl View for BrowserView {
     fn draw(&self, printer: &Printer) {
         *self.last_offset.write().unwrap() = printer.offset;
+        *self.last_content_w.write().unwrap() = printer.size.x;
 
         match self.section {
             BrowserSection::Playlists => self.playlists.draw(printer),
@@ -445,7 +559,22 @@ impl View for BrowserView {
 
 impl ViewExt for BrowserView {
     fn title(&self) -> String {
-        format!("{} ▾", self.section.label())
+        self.section.label().to_string()
+    }
+
+    fn on_resume(&self) {
+        // A view that was pushed on top of us was popped: the terminal area
+        // was overwritten while it was showing. Invalidate slot state so the
+        // next draw re-emits all sixels instead of deduplication-skipping them.
+        #[cfg(feature = "cover")]
+        {
+            self.playlists.invalidate_slots();
+            self.albums.invalidate_slots();
+        }
+    }
+
+    fn has_title_action(&self) -> bool {
+        true
     }
 
     fn on_title_action(&mut self) -> EventResult {

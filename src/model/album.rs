@@ -172,6 +172,10 @@ impl ListItem for Album {
         }
     }
 
+    fn cover_url(&self) -> Option<String> {
+        self.cover_url.clone()
+    }
+
     fn display_left(&self, _library: &Library) -> String {
         format!("{self}")
     }

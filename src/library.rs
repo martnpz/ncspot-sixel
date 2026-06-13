@@ -348,6 +348,15 @@ impl Library {
                     self.append_or_update(playlist);
                     // trigger redraw
                     self.trigger_redraw();
+                } else if remote.cover_url.is_some() {
+                    // Tracks unchanged; patch cover_url on the cached entry in
+                    // case it was saved before cover_url was introduced.
+                    let mut store = self.playlists.write().unwrap();
+                    if let Some(local) = store.iter_mut().find(|p| p.id == remote.id) {
+                        if local.cover_url.is_none() {
+                            local.cover_url = remote.cover_url.clone();
+                        }
+                    }
                 }
             }
             lists_batch = lists_page.next();

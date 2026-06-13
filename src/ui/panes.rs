@@ -17,7 +17,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::command::{Command, PaneDirection};
 use crate::commands::CommandResult;
-use crate::config::LayoutConfig;
+use crate::config::{IconKind, LayoutConfig};
 use crate::traits::ViewExt;
 
 pub struct Pane {
@@ -90,6 +90,7 @@ pub struct PaneLayoutView {
     padding_x: usize,
     /// Vertical padding: inside the border top/bottom.
     padding_y: usize,
+    cfg: std::sync::Arc<crate::config::Config>,
 }
 
 /// Draw a rounded border box at `rect` with the title centred in the top edge.
@@ -179,6 +180,7 @@ impl PaneLayoutView {
     /// Pane names that `make_view` doesn't know are skipped with an error log.
     pub fn new(
         config: &LayoutConfig,
+        cfg: std::sync::Arc<crate::config::Config>,
         mut make_view: impl FnMut(&str) -> Option<Box<dyn ViewExt>>,
     ) -> Self {
         let total: u32 = config.columns.iter().map(|c| c.width as u32).sum();
@@ -227,6 +229,7 @@ impl PaneLayoutView {
             gap_y: config.gap_y.or(config.gap).unwrap_or(1) as usize,
             padding_x: config.padding_x.or(config.padding).unwrap_or(0) as usize,
             padding_y: config.padding_y.or(config.padding).unwrap_or(0) as usize,
+            cfg,
         }
     }
 
@@ -314,6 +317,9 @@ impl PaneLayoutView {
             let rect = pane.rect;
             pane.top_mut()
                 .layout(rect.size().saturating_sub((2 * inset_x, 2 * inset_y)));
+            // Notify the re-exposed view so it can invalidate any state that
+            // became stale while a view above it was drawing to the same area.
+            pane.top().on_resume();
             return true;
         }
         false
@@ -340,7 +346,9 @@ impl View for PaneLayoutView {
 
                 // Island border with title in the top edge.
                 let title = if pane.views.len() > 1 {
-                    format!("< {}", pane.top().title())
+                    format!("{}{}", self.cfg.icon(IconKind::PaneBack), pane.top().title())
+                } else if pane.top().has_title_action() {
+                    format!("{}{}", pane.top().title(), self.cfg.icon(IconKind::PaneMenu))
                 } else {
                     pane.top().title()
                 };
