@@ -6,7 +6,7 @@
 use std::sync::{Arc, RwLock};
 
 use cursive::event::{Event, EventResult, EventTrigger, Key, MouseButton, MouseEvent};
-use cursive::theme::ColorStyle;
+use cursive::theme::{ColorStyle, ColorType};
 use cursive::view::Position;
 use cursive::views::OnEventView;
 use cursive::{Cursive, Printer, Vec2, View};
@@ -47,7 +47,11 @@ impl<V: View> View for DropdownBorder<V> {
             self.inner.draw(printer);
             return;
         }
-        printer.with_color(ColorStyle::title_secondary(), |p| {
+        let border_color = ColorStyle::new(
+            ColorType::Color(*printer.theme.palette.custom("dropdown_border").unwrap()),
+            ColorType::InheritParent,
+        );
+        printer.with_color(border_color, |p| {
             p.print((0, 0), &format!("╭{}╮", "─".repeat(w.saturating_sub(2))));
             for y in 1..h.saturating_sub(1) {
                 p.print((0, y), "│");
@@ -122,9 +126,15 @@ impl<T: Copy + Send + Sync + 'static> View for PaneDropdownMenu<T> {
         let w = printer.size.x;
         for (i, (label, _)) in self.items.iter().enumerate() {
             let style = if i == self.focus {
-                ColorStyle::highlight()
+                ColorStyle::new(
+                    ColorType::Color(*printer.theme.palette.custom("dropdown_focused_fg").unwrap()),
+                    ColorType::Color(*printer.theme.palette.custom("dropdown_focused_bg").unwrap()),
+                )
             } else {
-                ColorStyle::highlight_inactive()
+                ColorStyle::new(
+                    ColorType::Color(*printer.theme.palette.custom("dropdown_fg").unwrap()),
+                    ColorType::Color(*printer.theme.palette.custom("dropdown_bg").unwrap()),
+                )
             };
             printer.with_color(style, |p| {
                 p.print_hline((0, i), w, " ");

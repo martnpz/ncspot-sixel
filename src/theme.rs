@@ -35,6 +35,28 @@ macro_rules! load_color {
     };
 }
 
+/// Parse `s` as a [PaletteColor] name (case-insensitive, ignoring `-`/`_`),
+/// resolving it against `palette`, or fall back to [Color::parse].
+///
+/// Valid palette names: Background, Shadow, View, Primary, Secondary, Tertiary,
+/// TitlePrimary, TitleSecondary, Highlight, HighlightInactive, HighlightText.
+fn resolve_color(s: &str, palette: &Palette) -> Option<Color> {
+    match s.to_lowercase().replace(['-', '_'], "").as_str() {
+        "background" => Some(palette[Background]),
+        "shadow" => Some(palette[Shadow]),
+        "view" => Some(palette[View]),
+        "primary" => Some(palette[Primary]),
+        "secondary" => Some(palette[Secondary]),
+        "tertiary" => Some(palette[Tertiary]),
+        "titleprimary" => Some(palette[TitlePrimary]),
+        "titlesecondary" => Some(palette[TitleSecondary]),
+        "highlight" => Some(palette[Highlight]),
+        "highlightinactive" => Some(palette[HighlightInactive]),
+        "highlighttext" => Some(palette[HighlightText]),
+        _ => Color::parse(s),
+    }
+}
+
 /// Create a [cursive::theme::Theme] from `theme_cfg`.
 pub fn load(theme_cfg: &Option<ConfigTheme>) -> Theme {
     let mut palette = Palette::default();
@@ -81,6 +103,34 @@ pub fn load(theme_cfg: &Option<ConfigTheme>) -> Theme {
         "search_match",
         load_color!(theme_cfg, search_match, Light(Red)),
     );
+
+    // Dropdown colors are resolved after the main palette is built so they can
+    // reference PaletteColor names (e.g. "Highlight") in addition to hex/named
+    // values.  Unset fields inherit the matching standard palette entry.
+    let c = theme_cfg.as_ref().and_then(|t| t.dropdown_fg.as_deref())
+        .and_then(|s| resolve_color(s, &palette))
+        .unwrap_or_else(|| palette[Primary]);
+    palette.set_color("dropdown_fg", c);
+
+    let c = theme_cfg.as_ref().and_then(|t| t.dropdown_bg.as_deref())
+        .and_then(|s| resolve_color(s, &palette))
+        .unwrap_or_else(|| palette[HighlightInactive]);
+    palette.set_color("dropdown_bg", c);
+
+    let c = theme_cfg.as_ref().and_then(|t| t.dropdown_focused_fg.as_deref())
+        .and_then(|s| resolve_color(s, &palette))
+        .unwrap_or_else(|| palette[HighlightText]);
+    palette.set_color("dropdown_focused_fg", c);
+
+    let c = theme_cfg.as_ref().and_then(|t| t.dropdown_focused_bg.as_deref())
+        .and_then(|s| resolve_color(s, &palette))
+        .unwrap_or_else(|| palette[Highlight]);
+    palette.set_color("dropdown_focused_bg", c);
+
+    let c = theme_cfg.as_ref().and_then(|t| t.dropdown_border.as_deref())
+        .and_then(|s| resolve_color(s, &palette))
+        .unwrap_or_else(|| palette[TitleSecondary]);
+    palette.set_color("dropdown_border", c);
 
     Theme {
         shadow: false,

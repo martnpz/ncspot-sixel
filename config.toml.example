@@ -175,6 +175,46 @@ align = "center"
 #menu_share = "↗ "
 
 ###############################################################################
+# Theme colors
+###############################################################################
+# All color values accept:
+#   - Hex:   "#rrggbb"
+#   - Named: "dark red", "light blue", "default", etc.
+#   - Palette reference (inherits from the main palette):
+#     Background, Shadow, View, Primary, Secondary, Tertiary,
+#     TitlePrimary, TitleSecondary, Highlight, HighlightInactive, HighlightText
+
+#[theme]
+## Standard palette
+#background           = "default"
+#primary              = "default"
+#secondary            = "dark blue"
+#title                = "dark red"
+#highlight            = "dark white"    # text on highlighted row
+#highlight_bg         = "dark red"      # background of highlighted row
+#highlight_inactive_bg = "dark blue"    # background of inactive rows
+#playing              = "dark blue"
+#playing_selected     = "light blue"
+#playing_bg           = "default"
+#error                = "default"
+#error_bg             = "dark red"
+#statusbar_progress   = "dark blue"
+#statusbar_progress_bg = "light black"
+#statusbar            = "dark yellow"
+#statusbar_bg         = "default"
+#cmdline              = "default"
+#cmdline_bg           = "default"
+#search_match         = "light red"
+
+## Drop-menu colors (section-switcher dropdown and Now Playing options).
+## Defaults inherit from the main palette entries shown on the right.
+#dropdown_fg          = "Primary"           # text color of unfocused rows
+#dropdown_bg          = "HighlightInactive" # background of unfocused rows
+#dropdown_focused_fg  = "HighlightText"     # text color of the focused row
+#dropdown_focused_bg  = "Highlight"         # background of the focused row
+#dropdown_border      = "TitleSecondary"    # border color of the rounded box
+
+###############################################################################
 # Keybindings
 ###############################################################################
 # Lyrics screen is on F9, the pane layout on F4 by default. Example of

@@ -365,6 +365,11 @@ pub struct ConfigTheme {
     pub cmdline: Option<String>,
     pub cmdline_bg: Option<String>,
     pub search_match: Option<String>,
+    pub dropdown_fg: Option<String>,
+    pub dropdown_bg: Option<String>,
+    pub dropdown_focused_fg: Option<String>,
+    pub dropdown_focused_bg: Option<String>,
+    pub dropdown_border: Option<String>,
 }
 
 /// The ordering that is used when representing a playlist.
