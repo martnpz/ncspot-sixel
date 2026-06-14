@@ -3,21 +3,30 @@
 //! regardless of what's being browsed.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 
+use cursive::event::{Event, EventResult, EventTrigger, Key, MouseEvent};
 use cursive::theme::{ColorStyle, ColorType, Effect, PaletteColor, Style};
+use cursive::view::{Margins, Position};
+use cursive::views::{Dialog, OnEventView};
 use cursive::{Cursive, Printer, Vec2, View};
 use log::debug;
 use unicode_width::UnicodeWidthStr;
 
 use crate::command::Command;
 use crate::commands::CommandResult;
-use crate::config::Config;
+use crate::config::{Config, IconKind};
 use crate::events::EventManager;
+use crate::library::Library;
 use crate::model::playable::Playable;
+use crate::model::playlist::Playlist;
 use crate::queue::Queue;
 use crate::spotify::Spotify;
-use crate::traits::ViewExt;
+use crate::traits::{ListItem, ViewExt};
+use crate::ui::browser::{DropdownBorder, PaneDropdownMenu};
+use crate::ui::contextmenu::ContextMenu;
+use crate::ui::modal::Modal;
 
 #[cfg(feature = "cover")]
 use crate::ui::cover::CoverView;
@@ -57,10 +66,25 @@ pub fn fetch_genres(cache: &GenresCache, spotify: &Spotify, events: &EventManage
     });
 }
 
+#[derive(Clone, Copy)]
+enum NowPlayingAction {
+    AddToQueue,
+    AddToPlaylist,
+    RemoveFromPlaylist,
+    #[cfg(feature = "share_clipboard")]
+    Share,
+}
+
+
 pub struct InfoView {
     queue: Arc<Queue>,
+    library: Arc<Library>,
     cfg: Arc<Config>,
     genres: GenresCache,
+    last_offset: RwLock<Vec2>,
+    last_content_w: RwLock<usize>,
+    #[cfg(feature = "cover")]
+    cover_pause: Arc<AtomicBool>,
     #[cfg(feature = "cover")]
     cover: CoverView,
 }
@@ -68,14 +92,20 @@ pub struct InfoView {
 impl InfoView {
     pub fn new(
         queue: Arc<Queue>,
+        library: Arc<Library>,
         cfg: Arc<Config>,
         genres: GenresCache,
         #[cfg(feature = "cover")] cover: CoverView,
     ) -> Self {
         Self {
             queue,
+            library,
             cfg,
             genres,
+            last_offset: RwLock::new(Vec2::zero()),
+            last_content_w: RwLock::new(0),
+            #[cfg(feature = "cover")]
+            cover_pause: cover.pause_handle(),
             #[cfg(feature = "cover")]
             cover,
         }
@@ -114,10 +144,160 @@ impl InfoView {
             })
             .unwrap_or_default()
     }
+
+    fn open_dropdown(&self) -> EventResult {
+        let offset = *self.last_offset.read().unwrap();
+        let content_w = *self.last_content_w.read().unwrap();
+
+        // Mirror the draw_island centering formula used in panes.rs.
+        let title_padded_w = "Now Playing".width() + 4;
+        let left_fill = content_w.saturating_sub(title_padded_w) / 2;
+        let anchor = Vec2::new(offset.x + left_fill, offset.y);
+
+        let queue = self.queue.clone();
+        let library = self.library.clone();
+        let cfg = self.cfg.clone();
+
+        #[cfg(feature = "cover")]
+        self.cover_pause.store(true, Ordering::Relaxed);
+        #[cfg(feature = "cover")]
+        let cover_pause = self.cover_pause.clone();
+
+        EventResult::with_cb(move |s: &mut Cursive| {
+            let Some(playable) = queue.get_current() else {
+                #[cfg(feature = "cover")]
+                cover_pause.store(false, Ordering::Relaxed);
+                return;
+            };
+
+            let icon_add_to_queue = cfg.icon(IconKind::MenuAddToQueue);
+            let icon_add_to_playlist = cfg.icon(IconKind::MenuAddToPlaylist);
+            let icon_remove = cfg.icon(IconKind::MenuRemoveFromPlaylist);
+            #[cfg(feature = "share_clipboard")]
+            let icon_share = cfg.icon(IconKind::MenuShare);
+
+            let mut items = vec![(format!(" {icon_add_to_queue}Add to queue "), NowPlayingAction::AddToQueue)];
+            if playable.track().is_some() {
+                items.push((format!(" {icon_add_to_playlist}Add to playlist "), NowPlayingAction::AddToPlaylist));
+                items.push((format!(" {icon_remove}Remove from playlist "), NowPlayingAction::RemoveFromPlaylist));
+            }
+            #[cfg(feature = "share_clipboard")]
+            if playable.as_listitem().share_url().is_some() {
+                items.push((format!(" {icon_share}Share "), NowPlayingAction::Share));
+            }
+
+            let queue_cb = queue.clone();
+            let library_cb = library.clone();
+            #[cfg(feature = "cover")]
+            let cover_pause_cb = cover_pause.clone();
+
+            let menu_view = PaneDropdownMenu::new(items, move |s, action| {
+                let Some(playable) = queue_cb.get_current() else {
+                    #[cfg(feature = "cover")]
+                    cover_pause_cb.store(false, Ordering::Relaxed);
+                    s.pop_layer();
+                    return;
+                };
+                #[cfg(feature = "cover")]
+                cover_pause_cb.store(false, Ordering::Relaxed);
+                s.pop_layer();
+
+                match action {
+                    NowPlayingAction::AddToQueue => {
+                        queue_cb.insert_after_current(playable);
+                    }
+                    NowPlayingAction::AddToPlaylist => {
+                        if let Some(track) = playable.track() {
+                            let dialog = ContextMenu::add_track_dialog(
+                                library_cb.clone(),
+                                queue_cb.get_spotify(),
+                                track,
+                            );
+                            s.add_layer(dialog);
+                        }
+                    }
+                    NowPlayingAction::RemoveFromPlaylist => {
+                        if let Some(track) = playable.track() {
+                            let track_id = track.id.as_deref().unwrap_or("");
+                            let current_user_id = library_cb.user_id.as_deref().unwrap_or("");
+                            let playlists: Vec<Playlist> = library_cb
+                                .playlists
+                                .read()
+                                .unwrap()
+                                .iter()
+                                .filter(|pl| {
+                                    (current_user_id == pl.owner_id || pl.collaborative)
+                                        && pl.has_track(track_id)
+                                })
+                                .cloned()
+                                .collect();
+                            if playlists.is_empty() {
+                                let dialog =
+                                    Dialog::text("Track is not in any of your playlists.")
+                                        .title("Remove from playlist")
+                                        .padding(Margins::lrtb(1, 1, 1, 0))
+                                        .dismiss_button("Close");
+                                s.add_layer(Modal::new(dialog));
+                            } else {
+                                let dialog = ContextMenu::remove_track_dialog(
+                                    library_cb.clone(),
+                                    queue_cb.get_spotify(),
+                                    track,
+                                    playlists,
+                                );
+                                s.add_layer(dialog);
+                            }
+                        }
+                    }
+                    #[cfg(feature = "share_clipboard")]
+                    NowPlayingAction::Share => {
+                        if let Some(url) = playable.as_listitem().share_url() {
+                            crate::sharing::write_share(url).ok();
+                        }
+                    }
+                }
+            });
+
+            #[cfg(feature = "cover")]
+            let cover_pause_esc = cover_pause.clone();
+            #[cfg(feature = "cover")]
+            let cover_pause_q = cover_pause.clone();
+            #[cfg(feature = "cover")]
+            let cover_pause_mouse = cover_pause.clone();
+
+            let menu = OnEventView::new(DropdownBorder::new(menu_view))
+                .on_event(Key::Esc, move |s| {
+                    #[cfg(feature = "cover")]
+                    cover_pause_esc.store(false, Ordering::Relaxed);
+                    s.pop_layer();
+                })
+                .on_event(Event::Char('q'), move |s| {
+                    #[cfg(feature = "cover")]
+                    cover_pause_q.store(false, Ordering::Relaxed);
+                    s.pop_layer();
+                })
+                // Close on any unconsumed mouse press (click outside the dropdown).
+                .on_event(
+                    EventTrigger::from_fn(|e| {
+                        matches!(e, Event::Mouse { event: MouseEvent::Press(_), .. })
+                    }),
+                    move |s| {
+                        #[cfg(feature = "cover")]
+                        cover_pause_mouse.store(false, Ordering::Relaxed);
+                        s.pop_layer();
+                    },
+                );
+            s.screen_mut()
+                .add_layer_at(Position::absolute(anchor), menu);
+        })
+    }
 }
 
 impl View for InfoView {
     fn draw(&self, printer: &Printer) {
+        *self.last_offset.write().unwrap() = printer.offset;
+        *self.last_content_w.write().unwrap() = printer.size.x;
+
         let cover_height = printer.size.y.saturating_sub(METADATA_HEIGHT);
 
         #[cfg(feature = "cover")]
@@ -172,6 +352,14 @@ impl View for InfoView {
 impl ViewExt for InfoView {
     fn title(&self) -> String {
         "Now Playing".to_string()
+    }
+
+    fn has_title_action(&self) -> bool {
+        true
+    }
+
+    fn on_title_action(&mut self) -> EventResult {
+        self.open_dropdown()
     }
 
     fn on_leave(&self) {

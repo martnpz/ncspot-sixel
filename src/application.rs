@@ -295,6 +295,7 @@ impl Application {
                 "info" => Some(
                     ui::info::InfoView::new(
                         queue.clone(),
+                        library.clone(),
                         configuration.clone(),
                         genres_cache.clone(),
                         #[cfg(feature = "cover")]

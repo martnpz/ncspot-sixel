@@ -19,6 +19,7 @@ use crate::command::{Command, PaneDirection};
 use crate::commands::CommandResult;
 use crate::config::{IconKind, LayoutConfig};
 use crate::traits::ViewExt;
+use cursive::event::MouseButton;
 
 pub struct Pane {
     kind: String,
@@ -448,6 +449,20 @@ impl View for PaneLayoutView {
                     }
                     let pane = &mut self.columns[target.0].panes[target.1];
                     return pane.top_mut().on_title_action();
+                }
+
+                // Right-click anywhere in the pane: open the title action
+                // (drop menu) as a fallback for panes that support it.
+                let is_right_click = matches!(
+                    event,
+                    Event::Mouse {
+                        event: MouseEvent::Press(MouseButton::Right),
+                        ..
+                    }
+                );
+                if is_right_click && views_count == 1 {
+                    let pane = &mut self.columns[target.0].panes[target.1];
+                    return pane.top_mut().on_right_click();
                 }
 
                 let pane = &mut self.columns[target.0].panes[target.1];

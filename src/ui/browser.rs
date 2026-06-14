@@ -5,17 +5,17 @@
 
 use std::sync::{Arc, RwLock};
 
-use cursive::event::{Event, EventResult, Key, MouseButton, MouseEvent};
+use cursive::event::{Event, EventResult, EventTrigger, Key, MouseButton, MouseEvent};
 use cursive::theme::ColorStyle;
 use cursive::view::Position;
-use cursive::views::{Layer, OnEventView, SelectView};
+use cursive::views::OnEventView;
 use cursive::{Cursive, Printer, Vec2, View};
 use unicode_width::UnicodeWidthStr;
 use log::error;
 
 use crate::command::{Command, TargetMode};
 use crate::commands::CommandResult;
-use crate::config::Config;
+use crate::config::{Config, IconKind};
 use crate::events::EventManager;
 use crate::library::Library;
 use crate::model::playable::Playable;
@@ -94,6 +94,95 @@ impl<V: View> View for DropdownBorder<V> {
     }
 }
 
+/// Generic drop-down list that renders every row with a concrete palette
+/// background (opaque over sixel graphics).
+/// Focused row uses `highlight()`, all others use `highlight_inactive()`.
+pub(crate) struct PaneDropdownMenu<T: Copy + Send + Sync + 'static> {
+    items: Vec<(String, T)>,
+    focus: usize,
+    on_submit: Arc<dyn Fn(&mut Cursive, T) + Send + Sync>,
+}
+
+impl<T: Copy + Send + Sync + 'static> PaneDropdownMenu<T> {
+    pub(crate) fn new<F>(items: Vec<(String, T)>, on_submit: F) -> Self
+    where
+        F: Fn(&mut Cursive, T) + Send + Sync + 'static,
+    {
+        Self { items, focus: 0, on_submit: Arc::new(on_submit) }
+    }
+
+    pub(crate) fn with_focus(mut self, focus: usize) -> Self {
+        self.focus = focus.min(self.items.len().saturating_sub(1));
+        self
+    }
+}
+
+impl<T: Copy + Send + Sync + 'static> View for PaneDropdownMenu<T> {
+    fn draw(&self, printer: &Printer) {
+        let w = printer.size.x;
+        for (i, (label, _)) in self.items.iter().enumerate() {
+            let style = if i == self.focus {
+                ColorStyle::highlight()
+            } else {
+                ColorStyle::highlight_inactive()
+            };
+            printer.with_color(style, |p| {
+                p.print_hline((0, i), w, " ");
+                p.print((0, i), label);
+            });
+        }
+    }
+
+    fn required_size(&mut self, _: Vec2) -> Vec2 {
+        let w = self.items.iter().map(|(s, _)| s.width()).max().unwrap_or(0);
+        Vec2::new(w, self.items.len())
+    }
+
+    fn layout(&mut self, _: Vec2) {}
+
+    fn on_event(&mut self, event: Event) -> EventResult {
+        match event {
+            Event::Key(Key::Up) => {
+                if self.focus > 0 {
+                    self.focus -= 1;
+                    EventResult::Consumed(None)
+                } else {
+                    EventResult::Ignored
+                }
+            }
+            Event::Key(Key::Down) => {
+                if self.focus + 1 < self.items.len() {
+                    self.focus += 1;
+                    EventResult::Consumed(None)
+                } else {
+                    EventResult::Ignored
+                }
+            }
+            Event::Key(Key::Enter) => {
+                let cb = self.on_submit.clone();
+                let item = self.items[self.focus].1;
+                EventResult::with_cb(move |s| cb(s, item))
+            }
+            Event::Mouse {
+                event: MouseEvent::Press(_),
+                position,
+                offset,
+            } => {
+                let row = position.y.saturating_sub(offset.y);
+                if row < self.items.len() {
+                    self.focus = row;
+                    let cb = self.on_submit.clone();
+                    let item = self.items[row].1;
+                    EventResult::with_cb(move |s| cb(s, item))
+                } else {
+                    EventResult::Ignored
+                }
+            }
+            _ => EventResult::Ignored,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BrowserSection {
     Search,
@@ -163,6 +252,7 @@ pub struct BrowserView {
     /// draw and used to anchor the dropdown menu below the centred title.
     last_offset: RwLock<Vec2>,
     last_content_w: RwLock<usize>,
+    cfg: Arc<Config>,
 }
 
 impl BrowserView {
@@ -274,6 +364,7 @@ impl BrowserView {
             queue,
             library,
             events,
+            cfg,
         }
     }
 
@@ -393,6 +484,7 @@ impl BrowserView {
         let content_w = *self.last_content_w.read().unwrap();
         let current = self.section;
         let sections = self.sections.clone();
+        let cfg = self.cfg.clone();
 
         // Mirror how draw_island centres the pane title so the dropdown
         // opens directly below the title text.
@@ -415,31 +507,38 @@ impl BrowserView {
         let anchor = Vec2::new(offset.x + left_fill, offset.y);
 
         EventResult::with_cb(move |s: &mut Cursive| {
-            let mut select = SelectView::<BrowserSection>::new();
-            for section in &sections {
-                select.add_item(format!(" {} ", section.label()), *section);
-            }
-            // Pre-select the currently active section.
-            if let Some(idx) = sections.iter().position(|s| *s == current) {
-                select.set_selection(idx);
-            }
-            select.set_on_submit(|s: &mut Cursive, section: &BrowserSection| {
-                let section = *section;
+            let items: Vec<(String, BrowserSection)> = sections
+                .iter()
+                .map(|&sec| {
+                    let icon = cfg.icon(match sec {
+                        BrowserSection::Search => IconKind::MenuSearch,
+                        BrowserSection::Playlists => IconKind::MenuPlaylists,
+                        BrowserSection::Albums => IconKind::MenuAlbums,
+                        BrowserSection::Artists => IconKind::MenuArtists,
+                        BrowserSection::Recommendations => IconKind::MenuRecommendations,
+                    });
+                    (format!(" {icon}{} ", sec.label()), sec)
+                })
+                .collect();
+            let focus = sections.iter().position(|&sec| sec == current).unwrap_or(0);
+            let menu_view = PaneDropdownMenu::new(items, |s, section| {
                 s.pop_layer();
                 s.call_on_name("browser", move |browser: &mut Self| {
                     browser.set_section(section);
                 });
-            });
+            })
+            .with_focus(focus);
 
-            let menu = OnEventView::new(DropdownBorder::new(Layer::new(select)))
-                .on_event(Key::Esc, |s| {
-                    s.pop_layer();
-                })
-                .on_event(cursive::event::Event::Char('q'), |s| {
-                    s.pop_layer();
-                });
-            s.screen_mut()
-                .add_layer_at(Position::absolute(anchor), menu);
+            let menu = OnEventView::new(DropdownBorder::new(menu_view))
+                .on_event(Key::Esc, |s| { s.pop_layer(); })
+                .on_event(Event::Char('q'), |s| { s.pop_layer(); })
+                .on_event(
+                    EventTrigger::from_fn(|e| {
+                        matches!(e, Event::Mouse { event: MouseEvent::Press(_), .. })
+                    }),
+                    |s| { s.pop_layer(); },
+                );
+            s.screen_mut().add_layer_at(Position::absolute(anchor), menu);
         })
     }
 }

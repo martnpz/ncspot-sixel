@@ -157,6 +157,17 @@ pub struct IconsConfig {
     pub filter: Option<String>,
     pub pane_back: Option<String>,
     pub pane_menu: Option<String>,
+    pub menu_search: Option<String>,
+    pub menu_playlists: Option<String>,
+    pub menu_albums: Option<String>,
+    pub menu_artists: Option<String>,
+    pub menu_recommendations: Option<String>,
+    pub menu_lyrics: Option<String>,
+    pub menu_queue: Option<String>,
+    pub menu_add_to_queue: Option<String>,
+    pub menu_add_to_playlist: Option<String>,
+    pub menu_remove_from_playlist: Option<String>,
+    pub menu_share: Option<String>,
 }
 
 /// The icons that can be customized through [IconsConfig].
@@ -178,6 +189,18 @@ pub enum IconKind {
     PaneBack,
     /// Suffix shown in a pane title when the view has a dropdown menu.
     PaneMenu,
+    // Drop-menu item icons — one per selectable entry.
+    MenuSearch,
+    MenuPlaylists,
+    MenuAlbums,
+    MenuArtists,
+    MenuRecommendations,
+    MenuLyrics,
+    MenuQueue,
+    MenuAddToQueue,
+    MenuAddToPlaylist,
+    MenuRemoveFromPlaylist,
+    MenuShare,
 }
 
 impl IconKind {
@@ -196,6 +219,17 @@ impl IconKind {
             Self::Filter => ("\u{f002} ", "/ "),
             Self::PaneBack => ("\u{f0141} ", "< "),
             Self::PaneMenu => (" \u{f0140}", " ▾"),
+            Self::MenuSearch => ("\u{f002} ", "/ "),
+            Self::MenuPlaylists => ("\u{f03a} ", "= "),
+            Self::MenuAlbums => ("\u{f001} ", "♫ "),
+            Self::MenuArtists => ("\u{f007} ", "@ "),
+            Self::MenuRecommendations => ("\u{f005} ", "* "),
+            Self::MenuLyrics => ("\u{f075a} ", "♪ "),
+            Self::MenuQueue => ("\u{f03a} ", "= "),
+            Self::MenuAddToQueue => ("\u{f04b} ", "> "),
+            Self::MenuAddToPlaylist => ("\u{f0fe} ", "+ "),
+            Self::MenuRemoveFromPlaylist => ("\u{f146} ", "- "),
+            Self::MenuShare => ("\u{f064} ", "↗ "),
         }
     }
 }
@@ -481,6 +515,17 @@ impl Config {
                 IconKind::Filter => &icons.filter,
                 IconKind::PaneBack => &icons.pane_back,
                 IconKind::PaneMenu => &icons.pane_menu,
+                IconKind::MenuSearch => &icons.menu_search,
+                IconKind::MenuPlaylists => &icons.menu_playlists,
+                IconKind::MenuAlbums => &icons.menu_albums,
+                IconKind::MenuArtists => &icons.menu_artists,
+                IconKind::MenuRecommendations => &icons.menu_recommendations,
+                IconKind::MenuLyrics => &icons.menu_lyrics,
+                IconKind::MenuQueue => &icons.menu_queue,
+                IconKind::MenuAddToQueue => &icons.menu_add_to_queue,
+                IconKind::MenuAddToPlaylist => &icons.menu_add_to_playlist,
+                IconKind::MenuRemoveFromPlaylist => &icons.menu_remove_from_playlist,
+                IconKind::MenuShare => &icons.menu_share,
             }
             .clone()
         });

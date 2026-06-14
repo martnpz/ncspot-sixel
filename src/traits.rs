@@ -96,6 +96,12 @@ pub trait ViewExt: View {
     fn on_title_action(&mut self) -> cursive::event::EventResult {
         cursive::event::EventResult::Ignored
     }
+
+    /// Invoked on a right-click anywhere in the pane content area.
+    /// Default behaviour mirrors `on_title_action`; views can override.
+    fn on_right_click(&mut self) -> cursive::event::EventResult {
+        self.on_title_action()
+    }
 }
 
 impl<V: ViewExt> ViewExt for NamedView<V> {
@@ -125,6 +131,11 @@ impl<V: ViewExt> ViewExt for NamedView<V> {
 
     fn on_title_action(&mut self) -> cursive::event::EventResult {
         self.with_view_mut(|v| v.on_title_action())
+            .unwrap_or(cursive::event::EventResult::Ignored)
+    }
+
+    fn on_right_click(&mut self) -> cursive::event::EventResult {
+        self.with_view_mut(|v| v.on_right_click())
             .unwrap_or(cursive::event::EventResult::Ignored)
     }
 }
@@ -220,5 +231,9 @@ impl ViewExt for BoxedViewExt {
 
     fn on_title_action(&mut self) -> cursive::event::EventResult {
         self.boxed_view.on_title_action()
+    }
+
+    fn on_right_click(&mut self) -> cursive::event::EventResult {
+        self.boxed_view.on_right_click()
     }
 }

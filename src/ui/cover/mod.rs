@@ -4,6 +4,7 @@ pub mod ueberzug;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 
 use cursive::theme::{ColorStyle, ColorType, PaletteColor};
@@ -70,8 +71,10 @@ trait CoverBackend: Send + Sync {
         font_size: Vec2,
     ) -> bool;
 
-    /// Remove a previously drawn image, where the backend supports it.
-    fn clear(&self);
+    /// Remove a previously drawn image from the terminal. `offset` and `size`
+    /// are the cell coordinates of the cover area so backends that need to
+    /// write directly to the terminal (e.g. sixel) can blank the right region.
+    fn clear(&self, offset: Vec2, size: Vec2);
 }
 
 pub struct CoverView {
@@ -88,6 +91,9 @@ pub struct CoverView {
     backend: Box<dyn CoverBackend>,
     /// Maximum HiDPI scale correction from the config.
     scale: f32,
+    /// When true, sixel emission is suppressed (e.g. while a modal overlay is
+    /// shown). Setting to false and resetting drawn_url triggers a fresh emit.
+    paused: Arc<AtomicBool>,
 }
 
 impl CoverView {
@@ -128,7 +134,15 @@ impl CoverView {
             drawn_url: RwLock::new(None),
             draw_pending: RwLock::new(false),
             scale: config.values().cover_max_scale.unwrap_or(1.0),
+            paused: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Returns the shared pause flag. Set to `true` to suppress sixel
+    /// emission (e.g. while a dropdown overlay is shown) and back to `false`
+    /// to resume; a fresh emit is triggered automatically on the next draw.
+    pub fn pause_handle(&self) -> Arc<AtomicBool> {
+        self.paused.clone()
     }
 
     /// The size of a terminal cell in pixels, scaled by `cover_max_scale`.
@@ -139,6 +153,13 @@ impl CoverView {
 
     fn draw_cover(&self, url: String, draw_offset: Vec2, draw_size: Vec2) {
         if draw_size.x <= 1 || draw_size.y <= 1 {
+            return;
+        }
+
+        // While paused (e.g. a dropdown overlay is shown), suppress sixel
+        // emission and keep drawn_url cleared so a fresh emit fires on resume.
+        if self.paused.load(Ordering::Relaxed) {
+            *self.drawn_url.write().unwrap() = None;
             return;
         }
 
@@ -193,13 +214,17 @@ impl CoverView {
     }
 
     fn clear_cover(&self) {
-        let mut drawn_url = self.drawn_url.write().unwrap();
-        if drawn_url.is_none() {
-            return;
+        {
+            let mut drawn_url = self.drawn_url.write().unwrap();
+            if drawn_url.is_none() {
+                return;
+            }
+            *drawn_url = None;
         }
-        *drawn_url = None;
         *self.draw_pending.write().unwrap() = false;
-        self.backend.clear();
+        let offset = *self.last_offset.read().unwrap();
+        let size = *self.last_size.read().unwrap();
+        self.backend.clear(offset, size);
     }
 
     fn cache_path(&self, url: String) -> Option<PathBuf> {

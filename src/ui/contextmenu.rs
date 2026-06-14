@@ -30,6 +30,10 @@ pub struct AddToPlaylistMenu {
     dialog: Modal<Dialog>,
 }
 
+pub struct RemoveFromPlaylistMenu {
+    dialog: Modal<Dialog>,
+}
+
 pub struct SelectArtistMenu {
     dialog: Modal<Dialog>,
 }
@@ -111,6 +115,50 @@ impl ContextMenu {
             dialog: Modal::new_ext(dialog),
         }
         .with_name("addtrackmenu")
+    }
+
+    pub fn remove_track_dialog(
+        library: Arc<Library>,
+        spotify: Spotify,
+        track: Track,
+        playlists: Vec<Playlist>,
+    ) -> NamedView<RemoveFromPlaylistMenu> {
+        let mut list_select: SelectView<Playlist> = SelectView::new();
+        for playlist in &playlists {
+            list_select.add_item(playlist.name.clone(), playlist.clone());
+        }
+
+        list_select.set_on_submit(move |s, selected| {
+            let track = track.clone();
+            let mut playlist = selected.clone();
+            let spotify = spotify.clone();
+            let library = library.clone();
+
+            if let Some(track_id) = track.id.as_deref() {
+                if let Some(tracks) = &playlist.tracks {
+                    if let Some(index) = tracks
+                        .iter()
+                        .position(|t| t.id() == Some(track_id.to_string()))
+                    {
+                        playlist.delete_track(index, spotify, &library);
+                    }
+                }
+            }
+            s.pop_layer();
+        });
+
+        let dialog = Dialog::new()
+            .title("Remove from playlist")
+            .dismiss_button("Close")
+            .padding(Margins::lrtb(1, 1, 1, 0))
+            .content(ScrollView::new(
+                list_select.with_name("removefromplaylist_select"),
+            ));
+
+        RemoveFromPlaylistMenu {
+            dialog: Modal::new_ext(dialog),
+        }
+        .with_name("removefromplaylistmenu")
     }
 
     pub fn select_artist_dialog(
@@ -381,6 +429,12 @@ impl ViewExt for AddToPlaylistMenu {
     }
 }
 
+impl ViewExt for RemoveFromPlaylistMenu {
+    fn on_command(&mut self, s: &mut Cursive, cmd: &Command) -> Result<CommandResult, String> {
+        handle_move_command::<Playlist>(&mut self.dialog, s, cmd, "removefromplaylist_select")
+    }
+}
+
 impl ViewExt for ContextMenu {
     fn on_command(&mut self, s: &mut Cursive, cmd: &Command) -> Result<CommandResult, String> {
         handle_move_command::<ContextMenuAction>(&mut self.dialog, s, cmd, "contextmenu_select")
@@ -421,6 +475,10 @@ fn handle_move_command<T: Send + Sync + 'static>(
 }
 
 impl ViewWrapper for AddToPlaylistMenu {
+    wrap_impl!(self.dialog: Modal<Dialog>);
+}
+
+impl ViewWrapper for RemoveFromPlaylistMenu {
     wrap_impl!(self.dialog: Modal<Dialog>);
 }
 

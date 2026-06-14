@@ -100,7 +100,7 @@ impl CoverBackend for UeberzugBackend {
         true
     }
 
-    fn clear(&self) {
+    fn clear(&self, _offset: Vec2, _size: Vec2) {
         let cmd = "{\"action\": \"remove\", \"identifier\": \"cover\"}\n";
         if let Err(e) = self.run_cmd(cmd) {
             error!("Failed to run Ueberzug: {e}");

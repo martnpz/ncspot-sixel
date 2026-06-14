@@ -158,9 +158,21 @@ align = "center"
 #saved = "♥"
 #updating = "[U] "
 #lyrics_current = "♪ "
-#filter = "> "       # icon shown in the track-list filter input row
-#pane_back = "< "    # prefix shown in pane title when the view stack has depth > 1
-#pane_menu = " ▾"    # suffix shown in pane title when the view has a dropdown action
+#filter = "> "         # icon shown in the track-list filter input row
+#pane_back = " "    # prefix shown in pane title when the view stack has depth > 1
+#pane_menu = " "    # suffix shown in pane title when the view has a dropdown action
+# Drop-menu item icons (prefix before the label in every dropdown).
+#menu_search = "/ "
+#menu_playlists = "= "
+#menu_albums = "♫ "
+#menu_artists = "@ "
+#menu_recommendations = "* "
+#menu_lyrics = "♪ "
+#menu_queue = "= "
+#menu_add_to_queue = "> "
+#menu_add_to_playlist = "+ "
+#menu_remove_from_playlist = "- "
+#menu_share = "↗ "
 
 ###############################################################################
 # Keybindings

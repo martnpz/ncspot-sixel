@@ -1,9 +1,9 @@
 use std::sync::{Arc, RwLock};
 
-use cursive::event::{Event, EventResult, Key, MouseEvent};
+use cursive::event::{Event, EventResult, EventTrigger, Key, MouseEvent};
 use cursive::theme::{ColorStyle, ColorType, Effect, PaletteColor, Style};
 use cursive::view::Position;
-use cursive::views::{Layer, OnEventView, SelectView};
+use cursive::views::OnEventView;
 use cursive::{Cursive, Printer, Vec2, View};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -15,7 +15,7 @@ use crate::model::playable::Playable;
 use crate::queue::Queue;
 use crate::spotify::Spotify;
 use crate::traits::ViewExt;
-use crate::ui::browser::DropdownBorder;
+use crate::ui::browser::{DropdownBorder, PaneDropdownMenu};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LyricsSection {
@@ -151,6 +151,7 @@ impl LyricsView {
         let offset = *self.last_offset.read().unwrap();
         let content_w = *self.last_content_w.read().unwrap();
         let current = self.section;
+        let cfg = self.cfg.clone();
 
         // Mirror the draw_island centering formula used in panes.rs.
         let title_padded_w = current.label().width() + 4;
@@ -158,33 +159,36 @@ impl LyricsView {
         let anchor = Vec2::new(offset.x + left_fill, offset.y);
 
         EventResult::with_cb(move |s: &mut Cursive| {
-            let mut select = SelectView::<LyricsSection>::new();
-            for &section in &[LyricsSection::Lyrics, LyricsSection::Queue] {
-                select.add_item(format!(" {} ", section.label()), section);
-            }
-            if let Some(idx) = [LyricsSection::Lyrics, LyricsSection::Queue]
+            let sections = [LyricsSection::Lyrics, LyricsSection::Queue];
+            let items: Vec<(String, LyricsSection)> = sections
                 .iter()
-                .position(|&s| s == current)
-            {
-                select.set_selection(idx);
-            }
-            select.set_on_submit(|s: &mut Cursive, section: &LyricsSection| {
-                let section = *section;
+                .map(|&sec| {
+                    let icon = cfg.icon(match sec {
+                        LyricsSection::Lyrics => IconKind::MenuLyrics,
+                        LyricsSection::Queue => IconKind::MenuQueue,
+                    });
+                    (format!(" {icon}{} ", sec.label()), sec)
+                })
+                .collect();
+            let focus = sections.iter().position(|&sec| sec == current).unwrap_or(0);
+            let menu_view = PaneDropdownMenu::new(items, |s, section| {
                 s.pop_layer();
                 s.call_on_name("lyrics_pane", move |view: &mut LyricsView| {
                     view.set_section(section);
                 });
-            });
+            })
+            .with_focus(focus);
 
-            let menu = OnEventView::new(DropdownBorder::new(Layer::new(select)))
-                .on_event(Key::Esc, |s| {
-                    s.pop_layer();
-                })
-                .on_event(Event::Char('q'), |s| {
-                    s.pop_layer();
-                });
-            s.screen_mut()
-                .add_layer_at(Position::absolute(anchor), menu);
+            let menu = OnEventView::new(DropdownBorder::new(menu_view))
+                .on_event(Key::Esc, |s| { s.pop_layer(); })
+                .on_event(Event::Char('q'), |s| { s.pop_layer(); })
+                .on_event(
+                    EventTrigger::from_fn(|e| {
+                        matches!(e, Event::Mouse { event: MouseEvent::Press(_), .. })
+                    }),
+                    |s| { s.pop_layer(); },
+                );
+            s.screen_mut().add_layer_at(Position::absolute(anchor), menu);
         })
     }
 
@@ -403,6 +407,13 @@ impl ViewExt for LyricsView {
 
     fn on_title_action(&mut self) -> EventResult {
         self.open_dropdown()
+    }
+
+    /// Right-click re-centres the lyrics on the current line instead of
+    /// opening the dropdown.
+    fn on_right_click(&mut self) -> EventResult {
+        *self.follow.write().unwrap() = true;
+        EventResult::consumed()
     }
 
     fn on_command(&mut self, _s: &mut Cursive, cmd: &Command) -> Result<CommandResult, String> {

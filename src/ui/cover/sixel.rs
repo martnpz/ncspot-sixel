@@ -179,10 +179,32 @@ impl CoverBackend for SixelBackend {
         true
     }
 
-    fn clear(&self) {
-        // Nothing to do: when cursive repaints the cells underneath, the
-        // terminal drops the sixel pixels in that region.
+    fn clear(&self, offset: Vec2, size: Vec2) {
+        // Actively write blanks so the sixel pixels are erased even when
+        // crossterm's diff optimisation would otherwise skip that area.
+        clear_area(offset, size).ok();
     }
+}
+
+/// Overwrite `size` cells starting at `pos` with blank characters via a
+/// direct `/dev/tty` write, erasing any sixel pixels in that region.
+/// Called before showing a modal overlay so the sixel does not bleed through.
+pub fn clear_area(pos: Vec2, size: Vec2) -> std::io::Result<()> {
+    if size.x == 0 || size.y == 0 {
+        return Ok(());
+    }
+    let mut tty = OpenOptions::new().write(true).open("/dev/tty")?;
+    let blank_row = " ".repeat(size.x);
+    let mut out = Vec::with_capacity(size.y * (size.x + 16) + 32);
+    out.extend_from_slice(b"\x1b[?2026h\x1b7");
+    for y in 0..size.y {
+        out.extend_from_slice(
+            format!("\x1b[{};{}H", pos.y + y + 1, pos.x + 1).as_bytes(),
+        );
+        out.extend_from_slice(blank_row.as_bytes());
+    }
+    out.extend_from_slice(b"\x1b8\x1b[?2026l");
+    tty.write_all(&out)
 }
 
 /// Write the encoded sixel to the terminal at `pos` (cell coordinates),
