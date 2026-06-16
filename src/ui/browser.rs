@@ -423,7 +423,11 @@ impl BrowserView {
                     let tracks: Vec<Playable> = recommendations
                         .tracks
                         .iter()
-                        .map(|t| Playable::Track(crate::model::track::Track::from(t)))
+                        .map(|t| {
+                            let mut track = crate::model::track::Track::from(t);
+                            track.is_suggested = true;
+                            Playable::Track(track)
+                        })
                         .collect();
                     *content.write().unwrap() = tracks;
                     events.trigger();

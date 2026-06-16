@@ -126,3 +126,4 @@ section = "sound"
 
 [patch.crates-io]
 librespot-connect = { path = "vendor/librespot-connect" }
+cursive = { path = "vendor/cursive-0.21.1" }

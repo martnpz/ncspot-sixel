@@ -193,6 +193,13 @@ impl Playable {
             Self::Episode(episode) => episode.as_listitem(),
         }
     }
+
+    pub fn is_suggested(&self) -> bool {
+        match self {
+            Self::Track(track) => track.is_suggested,
+            Self::Episode(_) => false,
+        }
+    }
 }
 
 impl From<&PlayableItem> for Playable {

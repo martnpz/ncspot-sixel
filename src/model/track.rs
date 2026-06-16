@@ -35,6 +35,9 @@ pub struct Track {
     pub list_index: usize,
     pub is_local: bool,
     pub is_playable: Option<bool>,
+    /// True when the track was added via a Spotify recommendation (not from the user's own library).
+    #[serde(default)]
+    pub is_suggested: bool,
 }
 
 impl Track {
@@ -73,6 +76,7 @@ impl Track {
             list_index: 0,
             is_local: track.is_local,
             is_playable: track.is_playable,
+            is_suggested: false,
         }
     }
 
@@ -112,6 +116,7 @@ impl From<&SimplifiedTrack> for Track {
             list_index: 0,
             is_local: track.is_local,
             is_playable: track.is_playable,
+            is_suggested: false,
         }
     }
 }
@@ -153,6 +158,7 @@ impl From<&FullTrack> for Track {
             list_index: 0,
             is_local: track.is_local,
             is_playable: track.is_playable,
+            is_suggested: false,
         }
     }
 }
@@ -276,7 +282,11 @@ impl ListItem for Track {
                 .recommendations(None, None, Some(vec![id]))
                 .ok()
                 .map(|r| r.tracks)
-                .map(|tracks| tracks.iter().map(Self::from).collect())
+                .map(|tracks| tracks.iter().map(|t| {
+                    let mut track = Self::from(t);
+                    track.is_suggested = true;
+                    track
+                }).collect())
         } else {
             None
         };

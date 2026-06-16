@@ -89,11 +89,21 @@ pub fn load(theme_cfg: &Option<ConfigTheme>) -> Theme {
         "statusbar_progress_bg",
         load_color!(theme_cfg, statusbar_progress_bg, Light(Black)),
     );
-    palette.set_color("statusbar", load_color!(theme_cfg, statusbar, Dark(Yellow)));
-    palette.set_color(
-        "statusbar_bg",
-        load_color!(theme_cfg, statusbar_bg, TerminalDefault),
-    );
+    let statusbar_color = load_color!(theme_cfg, statusbar, Dark(Yellow));
+    palette.set_color("statusbar", statusbar_color);
+    let statusbar_bg_color = load_color!(theme_cfg, statusbar_bg, TerminalDefault);
+    palette.set_color("statusbar_bg", statusbar_bg_color);
+
+    // Controls row colors — fall back to the general statusbar colors when unset.
+    let c = theme_cfg.as_ref().and_then(|t| t.statusbar_controls.as_deref())
+        .and_then(|s| resolve_color(s, &palette))
+        .unwrap_or(statusbar_color);
+    palette.set_color("statusbar_controls", c);
+
+    let c = theme_cfg.as_ref().and_then(|t| t.statusbar_controls_bg.as_deref())
+        .and_then(|s| resolve_color(s, &palette))
+        .unwrap_or(statusbar_bg_color);
+    palette.set_color("statusbar_controls_bg", c);
     palette.set_color("cmdline", load_color!(theme_cfg, cmdline, TerminalDefault));
     palette.set_color(
         "cmdline_bg",

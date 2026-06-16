@@ -116,18 +116,22 @@ filter_row = true
 genres = 2
 
 ###############################################################################
-# Player bar
+# Player bar (always island style: ╭── title ──╮ / │ bar │ / │ controls │ / ╰──╯)
 ###############################################################################
 # [statusbar]
 # # Rows for the progress bar. 1 = one thin line (default), 2-3 = taller bar.
 # height = 1
-# # Character style: "thin" (━/┉, default) or "thick" (▬/─).
+# # Progress bar character style:
+# #   "thin"    — ━/┉ (default)
+# #   "thick"   — █/░
+# #   "rounded" — █/░ (nerd font variant)
 # style = "thin"
-# # Border decoration around the bar:
-# #   "none"    — no decoration (default)
-# #   "rounded" — full island border: ╭─────╮ / │ bar │ / │ info │ / ╰─────╯
-# #   "icon"    — │ end caps on the progress-bar rows only
-# border = "none"
+# # Delimiters wrapped around each button in the controls row.
+# button_open  = "[ "
+# button_close = " ]"
+# # Tag prepended to the track title when the track is a Spotify recommendation
+# # (smart shuffle or "Similar to …" list). Set to "" to disable.
+# suggested_tag = "[N] "
 
 ###############################################################################
 # Lyrics
@@ -152,9 +156,14 @@ align = "center"
 #playing = "▶ "
 #paused = "▮▮"
 #stopped = "◼ "
-#repeat = "[R] "
-#repeat_track = "[R1] "
-#shuffle = "[Z] "
+#repeat = "R"           # repeat playlist
+#repeat_track = "R"     # repeat one track
+#repeat_off = "X"       # no repeat
+#shuffle = "S"          # shuffle on
+#smart_shuffle = "S~"   # smart shuffle (visual only, same playback as shuffle)
+#shuffle_off = "X"      # shuffle off
+#player_prev = "|<"     # skip-previous button in the player bar
+#player_next = ">|"     # skip-next button in the player bar
 #saved = "♥"
 #updating = "[U] "
 #lyrics_current = "♪ "
@@ -202,6 +211,8 @@ align = "center"
 #statusbar_progress_bg = "light black"
 #statusbar            = "dark yellow"
 #statusbar_bg         = "default"
+#statusbar_controls   = "dark yellow"   # controls row fg; defaults to statusbar
+#statusbar_controls_bg = "default"      # controls row bg; defaults to statusbar_bg
 #cmdline              = "default"
 #cmdline_bg           = "default"
 #search_match         = "light red"

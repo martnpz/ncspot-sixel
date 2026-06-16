@@ -117,11 +117,17 @@ pub struct ConfigValues {
 pub struct StatusbarConfig {
     /// Rows occupied by the progress bar. 1 = one line (default), 2-3 = taller.
     pub height: Option<u8>,
-    /// Progress bar character style: `"thin"` (━/┉, default) or `"thick"` (█/░).
+    /// Progress bar character style: `"thin"` (━/┉, default), `"thick"` (█/░),
+    /// or `"rounded"` (█/░, nerd font variant).
     pub style: Option<String>,
-    /// Border decoration: `"none"` (default), `"rounded"` (╭╮ corners),
-    /// or `"icon"` (│ end caps on the bar rows only).
-    pub border: Option<String>,
+    /// Opening delimiter for control buttons. Default `"[ "`.
+    pub button_open: Option<String>,
+    /// Closing delimiter for control buttons. Default `" ]"`.
+    pub button_close: Option<String>,
+    /// Text (or icon) prepended to the title in the top border when the current
+    /// track comes from Spotify recommendations. Set to `""` to disable.
+    /// Default `"[N] "`.
+    pub suggested_tag: Option<String>,
 }
 
 /// Configuration of the lyrics view, set in the `[lyrics]` table.
@@ -150,7 +156,12 @@ pub struct IconsConfig {
     pub stopped: Option<String>,
     pub repeat: Option<String>,
     pub repeat_track: Option<String>,
+    pub repeat_off: Option<String>,
     pub shuffle: Option<String>,
+    pub smart_shuffle: Option<String>,
+    pub shuffle_off: Option<String>,
+    pub player_prev: Option<String>,
+    pub player_next: Option<String>,
     pub saved: Option<String>,
     pub updating: Option<String>,
     pub lyrics_current: Option<String>,
@@ -178,7 +189,12 @@ pub enum IconKind {
     Stopped,
     Repeat,
     RepeatTrack,
+    RepeatOff,
     Shuffle,
+    SmartShuffle,
+    ShuffleOff,
+    PlayerPrev,
+    PlayerNext,
     Saved,
     Updating,
     /// Marker shown next to the currently sung lyrics line.
@@ -210,9 +226,14 @@ impl IconKind {
             Self::Playing => ("\u{f04b} ", "▶ "),
             Self::Paused => ("\u{f04c} ", "▮▮"),
             Self::Stopped => ("\u{f04d} ", "◼ "),
-            Self::Repeat => ("\u{f0456} ", "[R] "),
-            Self::RepeatTrack => ("\u{f0458} ", "[R1] "),
-            Self::Shuffle => ("\u{f049d} ", "[Z] "),
+            Self::Repeat => ("\u{f0456} ", "R"),
+            Self::RepeatTrack => ("\u{f0458} ", "R"),
+            Self::RepeatOff => ("X", "X"),
+            Self::Shuffle => ("\u{f049d} ", "S"),
+            Self::SmartShuffle => ("\u{f0ae2} ", "S~"),
+            Self::ShuffleOff => ("X", "X"),
+            Self::PlayerPrev => ("\u{f04ae} ", "|<"),
+            Self::PlayerNext => ("\u{f04ad} ", ">|"),
             Self::Saved => ("\u{f012c}", "✓"),
             Self::Updating => ("\u{f04e6} ", "[U] "),
             Self::LyricsCurrent => ("\u{f075a} ", "♪ "),
@@ -362,6 +383,10 @@ pub struct ConfigTheme {
     pub statusbar_progress_bg: Option<String>,
     pub statusbar: Option<String>,
     pub statusbar_bg: Option<String>,
+    /// Text color for the controls row (buttons + time/vol). Falls back to `statusbar`.
+    pub statusbar_controls: Option<String>,
+    /// Background color for the controls row. Falls back to `statusbar_bg`.
+    pub statusbar_controls_bg: Option<String>,
     pub cmdline: Option<String>,
     pub cmdline_bg: Option<String>,
     pub search_match: Option<String>,
@@ -401,6 +426,10 @@ pub struct LastOpenedItem {
 pub struct UserState {
     pub volume: u16,
     pub shuffle: bool,
+    /// Visual-only flag: when true the shuffle button shows the "smart shuffle" icon.
+    /// Playback behaviour is identical to regular shuffle.
+    #[serde(default)]
+    pub smart_shuffle_visual: bool,
     pub repeat: queue::RepeatSetting,
     pub queuestate: QueueState,
     pub playlist_orders: HashMap<String, SortingOrder>,
@@ -416,6 +445,7 @@ impl Default for UserState {
         Self {
             volume: u16::MAX,
             shuffle: false,
+            smart_shuffle_visual: false,
             repeat: queue::RepeatSetting::None,
             queuestate: QueueState::default(),
             playlist_orders: HashMap::new(),
@@ -513,7 +543,12 @@ impl Config {
                 IconKind::Stopped => &icons.stopped,
                 IconKind::Repeat => &icons.repeat,
                 IconKind::RepeatTrack => &icons.repeat_track,
+                IconKind::RepeatOff => &icons.repeat_off,
                 IconKind::Shuffle => &icons.shuffle,
+                IconKind::SmartShuffle => &icons.smart_shuffle,
+                IconKind::ShuffleOff => &icons.shuffle_off,
+                IconKind::PlayerPrev => &icons.player_prev,
+                IconKind::PlayerNext => &icons.player_next,
                 IconKind::Saved => &icons.saved,
                 IconKind::Updating => &icons.updating,
                 IconKind::LyricsCurrent => &icons.lyrics_current,

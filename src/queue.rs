@@ -59,10 +59,14 @@ impl Queue {
     ) -> Self {
         let queue_state = cfg.state().queuestate.clone();
 
+        // Clamp current_track to a valid index in case a previous run persisted
+        // a corrupted out-of-bounds value (e.g. from a buggy bulk removal).
+        let current_track = queue_state.current_track.filter(|&i| i < queue_state.queue.len());
+
         Self {
             queue: Arc::new(RwLock::new(queue_state.queue)),
             spotify: spotify.clone(),
-            current_track: RwLock::new(queue_state.current_track),
+            current_track: RwLock::new(current_track),
             random_order: RwLock::new(queue_state.random_order),
             events,
             cfg,
@@ -77,16 +81,19 @@ impl Queue {
             Some(mut index) => {
                 let random_order = self.random_order.read().unwrap();
                 if let Some(order) = random_order.as_ref() {
-                    index = order.iter().position(|&i| i == index).unwrap();
+                    index = order.iter().position(|&i| i == index)?;
                 }
 
-                let mut next_index = index + 1;
-                if next_index < self.queue.read().unwrap().len() {
+                let next_pos = index + 1;
+                if next_pos < self.queue.read().unwrap().len() {
                     if let Some(order) = random_order.as_ref() {
-                        next_index = order[next_index];
+                        // Use get() — order and queue can briefly disagree while a
+                        // background append() is between its queue.write() and
+                        // random_order.write() steps.
+                        Some(*order.get(next_pos)?)
+                    } else {
+                        Some(next_pos)
                     }
-
-                    Some(next_index)
                 } else {
                     None
                 }
@@ -102,16 +109,16 @@ impl Queue {
             Some(mut index) => {
                 let random_order = self.random_order.read().unwrap();
                 if let Some(order) = random_order.as_ref() {
-                    index = order.iter().position(|&i| i == index).unwrap();
+                    index = order.iter().position(|&i| i == index)?;
                 }
 
                 if index > 0 {
-                    let mut next_index = index - 1;
+                    let prev_pos = index - 1;
                     if let Some(order) = random_order.as_ref() {
-                        next_index = order[next_index];
+                        Some(*order.get(prev_pos)?)
+                    } else {
+                        Some(prev_pos)
                     }
-
-                    Some(next_index)
                 } else {
                     None
                 }
@@ -137,7 +144,7 @@ impl Queue {
         if let Some(index) = self.get_current_index() {
             let mut random_order = self.random_order.write().unwrap();
             if let Some(order) = random_order.as_mut() {
-                let next_i = order.iter().position(|&i| i == index).unwrap();
+                let Some(next_i) = order.iter().position(|&i| i == index) else { return; };
                 // shift everything after the insertion in order
                 for item in order.iter_mut() {
                     if *item > index {
@@ -156,13 +163,18 @@ impl Queue {
 
     /// Add `track` to the end of the queue.
     pub fn append(&self, track: Playable) {
-        let mut random_order = self.random_order.write().unwrap();
-        if let Some(order) = random_order.as_mut() {
-            order.push(order.len());
-        }
-
+        // Acquire queue.write() first, then random_order.write() — same order as
+        // generate_random_order() (which takes queue.read() then random_order.write()).
+        // Consistent ordering avoids deadlock when both run concurrently.
         let mut q = self.queue.write().unwrap();
         q.push(track);
+        let new_index = q.len() - 1;
+        drop(q); // release before taking random_order so readers aren't blocked longer than needed
+
+        let mut random_order = self.random_order.write().unwrap();
+        if let Some(order) = random_order.as_mut() {
+            order.push(new_index);
+        }
     }
 
     /// Append `tracks` after the currently playing item, taking into account
@@ -333,17 +345,17 @@ impl Queue {
         }
     }
 
-    /// Toggle the playback. If playback is currently stopped, this will either
-    /// play the next song if one is available, or restart from the start.
+    /// Toggle the playback. If playback is currently stopped, resume the current
+    /// track (or start from the beginning if none is set).
     pub fn toggleplayback(&self) {
         match self.spotify.get_current_status() {
             PlayerEvent::Playing(_) | PlayerEvent::Paused(_) => {
                 self.spotify.toggleplayback();
             }
-            PlayerEvent::Stopped => match self.next_index() {
-                Some(_) => self.next(false),
-                None => self.play(0, false, false),
-            },
+            PlayerEvent::Stopped => {
+                let index = self.get_current_index().unwrap_or(0);
+                self.play(index, false, false);
+            }
             _ => (),
         }
     }
@@ -443,8 +455,10 @@ impl Queue {
         let mut random: Vec<usize> = (0..q.len()).collect();
 
         if let Some(current) = *self.current_track.read().unwrap() {
-            order.push(current);
-            random.remove(current);
+            if current < q.len() {
+                order.push(current);
+                random.remove(current);
+            }
         }
 
         let mut rng = rand::rng();
@@ -482,6 +496,62 @@ impl Queue {
     /// Get the spotify session.
     pub fn get_spotify(&self) -> Spotify {
         self.spotify.clone()
+    }
+
+    /// Return up to `limit` track IDs from non-suggested queue entries.
+    /// Used to seed the Spotify recommendations API for smart shuffle.
+    pub fn seed_track_ids(&self, limit: usize) -> Vec<String> {
+        self.queue
+            .read()
+            .unwrap()
+            .iter()
+            .filter(|t| !t.is_suggested())
+            .filter_map(|t| t.id())
+            .take(limit)
+            .collect()
+    }
+
+    /// Remove all suggested tracks (added by smart shuffle) from the queue,
+    /// preserving the currently playing track even if it is suggested.
+    pub fn remove_suggested(&self) {
+        let original_current = *self.current_track.read().unwrap();
+
+        // First pass: collect original indices to remove (skip the playing track).
+        let to_remove: Vec<usize> = {
+            let q = self.queue.read().unwrap();
+            q.iter()
+                .enumerate()
+                .filter(|&(i, t)| t.is_suggested() && original_current != Some(i))
+                .map(|(i, _)| i)
+                .collect()
+        };
+
+        if to_remove.is_empty() {
+            return;
+        }
+
+        // Second pass: remove in reverse order so earlier indices stay valid.
+        let removed_before_current = to_remove
+            .iter()
+            .filter(|&&i| original_current.map(|cur| i < cur).unwrap_or(false))
+            .count();
+        {
+            let mut q = self.queue.write().unwrap();
+            for &i in to_remove.iter().rev() {
+                q.remove(i);
+            }
+        }
+
+        if removed_before_current > 0 {
+            let mut current = self.current_track.write().unwrap();
+            if let Some(ref mut idx) = *current {
+                *idx -= removed_before_current;
+            }
+        }
+
+        if self.get_shuffle() {
+            self.generate_random_order();
+        }
     }
 }
 
@@ -550,6 +620,7 @@ mod tests {
             is_local: false,
             // Must be Some(true) so Spotify::load() doesn't fire events.
             is_playable: Some(true),
+            is_suggested: false,
         })
     }
 

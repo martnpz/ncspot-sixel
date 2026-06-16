@@ -36,11 +36,14 @@ enum PlayerStatus {
 pub struct Worker {
     events: EventManager,
     player_events: UnboundedReceiverStream<LibrespotPlayerEvent>,
-    commands: UnboundedReceiverStream<WorkerCommand>,
+    commands: mpsc::UnboundedReceiver<WorkerCommand>,
     session: Session,
     player: Arc<Player>,
     player_status: PlayerStatus,
     mixer: Arc<dyn Mixer>,
+    /// The play_request_id librespot assigned to our most recent player.load() call.
+    /// Used to drop stale EndOfTrack events that arrive after a manual skip.
+    current_play_request_id: Option<u64>,
 }
 
 impl Worker {
@@ -55,11 +58,33 @@ impl Worker {
         Self {
             events,
             player_events: UnboundedReceiverStream::new(player_events),
-            commands: UnboundedReceiverStream::new(commands),
+            commands,
             player,
             session,
             player_status: PlayerStatus::Stopped,
             mixer,
+            current_play_request_id: None,
+        }
+    }
+
+    fn handle_command(&mut self, cmd: WorkerCommand) {
+        match cmd {
+            WorkerCommand::Load(..) => unreachable!("Load handled by run_loop"),
+            WorkerCommand::Play => self.player.play(),
+            WorkerCommand::Pause => self.player.pause(),
+            WorkerCommand::Stop => self.player.stop(),
+            WorkerCommand::Seek(pos) => self.player.seek(pos),
+            WorkerCommand::SetVolume(volume) => self.mixer.set_volume(volume),
+            WorkerCommand::Preload(playable) => {
+                if let Ok(uri) = SpotifyUri::from_uri(&playable.uri()) {
+                    debug!("Preloading {uri:?}");
+                    self.player.preload(uri);
+                }
+            }
+            WorkerCommand::Shutdown => {
+                self.player.stop();
+                self.session.shutdown();
+            }
         }
     }
 
@@ -74,8 +99,26 @@ impl Worker {
             }
 
             tokio::select! {
-                cmd = self.commands.next() => match cmd {
-                    Some(WorkerCommand::Load(playable, start_playing, position_ms)) => {
+                cmd = self.commands.recv() => match cmd {
+                    Some(WorkerCommand::Load(mut playable, mut start_playing, mut position_ms)) => {
+                        // Coalesce consecutive Load commands queued before this one is processed.
+                        // Rapid next/prev clicks can stack multiple Loads; calling player.load()
+                        // twice before librespot acknowledges the first one crashes the player task.
+                        loop {
+                            match self.commands.try_recv() {
+                                Ok(WorkerCommand::Load(p, s, pos)) => {
+                                    playable = p;
+                                    start_playing = s;
+                                    position_ms = pos;
+                                }
+                                Ok(other) => {
+                                    // Non-load command between rapid skips — execute it, then stop draining.
+                                    self.handle_command(other);
+                                    break;
+                                }
+                                Err(_) => break,
+                            }
+                        }
                         match SpotifyUri::from_uri(&playable.uri()) {
                             Ok(uri) => {
                                 info!("player loading track: {uri:?}");
@@ -92,32 +135,8 @@ impl Worker {
                             }
                         }
                     }
-                    Some(WorkerCommand::Play) => {
-                        self.player.play();
-                    }
-                    Some(WorkerCommand::Pause) => {
-                        self.player.pause();
-                    }
-                    Some(WorkerCommand::Stop) => {
-                        self.player.stop();
-                    }
-                    Some(WorkerCommand::Seek(pos)) => {
-                        self.player.seek(pos);
-                    }
-                    Some(WorkerCommand::SetVolume(volume)) => {
-                        self.mixer.set_volume(volume);
-                    }
-                    Some(WorkerCommand::Preload(playable)) => {
-                        if let Ok(uri) = SpotifyUri::from_uri(&playable.uri()) {
-                            debug!("Preloading {uri:?}");
-                            self.player.preload(uri);
-                        }
-                    }
-                    Some(WorkerCommand::Shutdown) => {
-                        self.player.stop();
-                        self.session.shutdown();
-                    }
-                    None => info!("empty stream")
+                    Some(other) => self.handle_command(other),
+                    None => info!("command channel closed"),
                 },
                 event = self.player_events.next() => match event {
                     Some(LibrespotPlayerEvent::Playing {
@@ -145,12 +164,25 @@ impl Worker {
                         self.events.send(Event::Player(PlayerEvent::Stopped));
                         self.player_status = PlayerStatus::Stopped;
                     }
-                    Some(LibrespotPlayerEvent::EndOfTrack { .. }) => {
-                        self.events.send(Event::Player(PlayerEvent::FinishedTrack));
+                    Some(LibrespotPlayerEvent::PlayRequestIdChanged { play_request_id }) => {
+                        self.current_play_request_id = Some(play_request_id);
                     }
-                    Some(LibrespotPlayerEvent::TimeToPreloadNextTrack { .. }) => {
-                        self.events
-                            .send(Event::Queue(QueueEvent::PreloadTrackRequest));
+                    Some(LibrespotPlayerEvent::EndOfTrack { play_request_id, .. }) => {
+                        // Ignore stale EndOfTrack events from tracks we manually skipped.
+                        // After player.load() the play_request_id changes; an EndOfTrack
+                        // with the old id means the previous track naturally ran out after
+                        // we had already moved on, which would cause a double-load crash.
+                        if self.current_play_request_id == Some(play_request_id) {
+                            self.events.send(Event::Player(PlayerEvent::FinishedTrack));
+                        } else {
+                            debug!("Ignoring stale EndOfTrack (id {play_request_id}, current {:?})", self.current_play_request_id);
+                        }
+                    }
+                    Some(LibrespotPlayerEvent::TimeToPreloadNextTrack { play_request_id, .. }) => {
+                        if self.current_play_request_id == Some(play_request_id) {
+                            self.events
+                                .send(Event::Queue(QueueEvent::PreloadTrackRequest));
+                        }
                     }
                     Some(LibrespotPlayerEvent::Seeked { play_request_id: _, track_id: _, position_ms}) => {
                         let position = Duration::from_millis(position_ms as u64);
