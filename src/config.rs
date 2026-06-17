@@ -128,6 +128,9 @@ pub struct StatusbarConfig {
     /// track comes from Spotify recommendations. Set to `""` to disable.
     /// Default `"[N] "`.
     pub suggested_tag: Option<String>,
+    /// Animate a bright left-to-right shimmer over a recommended track's title.
+    /// Default `true`.
+    pub suggested_shimmer: Option<bool>,
 }
 
 /// Configuration of the lyrics view, set in the `[lyrics]` table.

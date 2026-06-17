@@ -132,6 +132,8 @@ genres = 2
 # # Tag prepended to the track title when the track is a Spotify recommendation
 # # (smart shuffle or "Similar to …" list). Set to "" to disable.
 # suggested_tag = "[N] "
+# # Animate a bright left-to-right shimmer over a recommended track's title.
+# suggested_shimmer = true
 
 ###############################################################################
 # Lyrics

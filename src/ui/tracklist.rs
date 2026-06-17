@@ -221,6 +221,22 @@ impl TrackListView {
             .and_then(|&index| content.get(index).cloned())
     }
 
+    /// Spotify-style play: make the whole list (in its displayed/filtered order)
+    /// the queue, starting playback at the current selection. Replaces whatever
+    /// was queued before so the queue reflects the playlist/album being played.
+    fn play_all_from_selected(&self) {
+        let (tracks, index) = {
+            let content = self.content.read().unwrap();
+            let tracks: Vec<Playable> = self
+                .filtered
+                .iter()
+                .filter_map(|&i| content.get(i).cloned())
+                .collect();
+            (tracks, self.selected)
+        };
+        self.queue.replace_and_play_index(tracks, index);
+    }
+
     fn with_selected_item_mut<R>(&self, f: impl FnOnce(&mut Playable) -> R) -> Option<R> {
         let mut content = self.content.write().unwrap();
         self.filtered
@@ -490,8 +506,9 @@ impl View for TrackListView {
                         let index = self.scroll_top + slot;
                         if index < self.filtered.len() {
                             if index == self.selected {
-                                // Second click on the selection plays it.
-                                self.with_selected_item_mut(|item| item.play(&self.queue));
+                                // Second click on the selection plays it (and the
+                                // rest of the list as the queue).
+                                self.play_all_from_selected();
                             } else {
                                 self.selected = index;
                                 self.clamp_scroll();
@@ -593,7 +610,7 @@ impl ViewExt for TrackListView {
     fn on_command(&mut self, _s: &mut Cursive, cmd: &Command) -> Result<CommandResult, String> {
         match cmd {
             Command::Play => {
-                self.with_selected_item_mut(|item| item.play(&self.queue));
+                self.play_all_from_selected();
                 Ok(CommandResult::Consumed(None))
             }
             Command::PlayNext => {

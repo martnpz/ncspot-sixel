@@ -190,6 +190,9 @@ impl ListItem for Playlist {
 
     fn play(&mut self, queue: &Queue) {
         self.load_tracks(&queue.get_spotify());
+        // Record as the shuffle context so the shuffle button can (re)load it,
+        // even when played directly without navigating into the playlist.
+        queue.set_last_opened("playlist", self.id.clone());
 
         if let Some(tracks) = &self.tracks {
             let index = queue.append_next(tracks);

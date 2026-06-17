@@ -138,6 +138,18 @@ impl Queue {
         *self.current_track.read().unwrap()
     }
 
+    /// Record which playlist/album the queue was last populated from. The shuffle
+    /// button uses this as the "selected playlist" to (re)load. `kind` is
+    /// "playlist" or "album".
+    pub fn set_last_opened(&self, kind: &str, id: String) {
+        self.cfg.with_state_mut(|state| {
+            state.last_opened = Some(crate::config::LastOpenedItem {
+                kind: kind.to_string(),
+                id: id.clone(),
+            });
+        });
+    }
+
     /// Insert `track` as the item that should logically follow the currently
     /// playing item, taking into account shuffle status.
     pub fn insert_after_current(&self, track: Playable) {
@@ -276,6 +288,29 @@ impl Queue {
         }
     }
 
+    /// Replace the entire queue with `tracks` and start playback at `index`
+    /// (clamped). Used when playing from a track list so the queue becomes that
+    /// list in order — i.e. the played playlist/album is the playback context.
+    /// If shuffle is on, the order is regenerated around the played track.
+    /// No-op if `tracks` is empty.
+    ///
+    /// Never holds a queue guard across play() — see next() for the rationale.
+    pub fn replace_and_play_index(&self, tracks: Vec<Playable>, index: usize) {
+        if tracks.is_empty() {
+            return;
+        }
+        let index = index.min(tracks.len() - 1);
+        {
+            let mut q = self.queue.write().unwrap();
+            *q = tracks;
+        }
+        *self.current_track.write().unwrap() = None;
+        // Drop any stale shuffle order from the previous contents; play() with
+        // reshuffle=true rebuilds it (around `index`) when shuffle is on.
+        *self.random_order.write().unwrap() = None;
+        self.play(index, true, false);
+    }
+
     /// The amount of items in `self.queue`.
     pub fn len(&self) -> usize {
         self.queue.read().unwrap().len()
@@ -314,10 +349,14 @@ impl Queue {
             index = rng.random_range(0..queue_length);
         }
 
-        if let Some(track) = &self.queue.read().unwrap().get(index) {
-            self.spotify.load(track, true, 0);
-            let mut current = self.current_track.write().unwrap();
-            current.replace(index);
+        // Clone the track out under a brief read lock, then drop it. play() must
+        // NOT hold queue.read() while taking current_track.write(): get_current()
+        // locks current_track then queue (opposite order), so holding both here
+        // deadlocks against it when a queue writer is also queued (see next()).
+        let track = self.queue.read().unwrap().get(index).cloned();
+        if let Some(track) = track {
+            self.spotify.load(&track, true, 0);
+            self.current_track.write().unwrap().replace(index);
             self.spotify.update_track();
 
             #[cfg(feature = "notify")]
@@ -336,8 +375,8 @@ impl Queue {
                     let default_body = crate::config::NotificationFormat::default().body.unwrap();
                     let body = format.body.unwrap_or_else(|| default_body.clone());
 
-                    let summary_txt = Playable::format(track, &title, &self.library);
-                    let body_txt = Playable::format(track, &body, &self.library);
+                    let summary_txt = Playable::format(&track, &title, &self.library);
+                    let body_txt = Playable::format(&track, &body, &self.library);
                     let cover_url = track.cover_url();
                     move || send_notification(&summary_txt, &body_txt, cover_url)
                 });
@@ -348,7 +387,7 @@ impl Queue {
             self.spotify.notify_seeked(0);
 
             self.events
-                .send(Event::TrackChanged(Box::new((*track).clone())));
+                .send(Event::TrackChanged(Box::new(track)));
         }
 
         if reshuffle && self.get_shuffle() {

@@ -1,13 +1,14 @@
 use std::sync::Arc;
 use std::thread;
+use std::time::{Duration, Instant};
 
 use cursive::Printer;
 use cursive::align::HAlign;
 use cursive::event::{Event, EventResult, MouseButton, MouseEvent};
-use cursive::theme::{ColorStyle, ColorType, PaletteColor};
+use cursive::theme::{Color, ColorStyle, ColorType, PaletteColor};
 use cursive::traits::View;
 use cursive::vec::Vec2;
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::config::IconKind;
 use crate::library::Library;
@@ -17,17 +18,47 @@ use crate::queue::{Queue, RepeatSetting};
 use crate::spotify::{PlayerEvent, Spotify};
 use crate::utils::ms_to_hms;
 
+/// One full left-to-right shimmer sweep over a suggested-track title.
+const SHIMMER_CYCLE: Duration = Duration::from_millis(1800);
+/// Redraw interval while a suggested track is playing (~6 fps).
+const SHIMMER_FRAME: Duration = Duration::from_millis(160);
+
 pub struct StatusBar {
     queue: Arc<Queue>,
     spotify: Spotify,
     library: Arc<Library>,
     last_size: Vec2,
+    /// Time origin for the suggested-track title shimmer animation.
+    shimmer_start: Instant,
 }
 
 impl StatusBar {
     pub fn new(queue: Arc<Queue>, library: Arc<Library>) -> Self {
         let spotify = queue.get_spotify();
-        Self { queue, spotify, library, last_size: Vec2::new(0, 0) }
+
+        // Drive the title shimmer: while the current track is a recommendation,
+        // nudge the UI to redraw at the animation frame rate. Idle (non-suggested)
+        // it polls slowly so it costs almost nothing.
+        {
+            let queue = queue.clone();
+            let library = library.clone();
+            thread::spawn(move || {
+                loop {
+                    let animate = queue
+                        .get_current()
+                        .map(|t| t.is_suggested())
+                        .unwrap_or(false);
+                    if animate {
+                        library.trigger_redraw();
+                        thread::sleep(SHIMMER_FRAME);
+                    } else {
+                        thread::sleep(Duration::from_millis(300));
+                    }
+                }
+            });
+        }
+
+        Self { queue, spotify, library, last_size: Vec2::new(0, 0), shimmer_start: Instant::now() }
     }
 
     fn bar_height(&self) -> usize {
@@ -224,14 +255,18 @@ impl StatusBar {
             (false, false)
         };
 
-        let entering_smart = new_smart && !smart;
-        let leaving_smart = !new_smart && smart;
-
         self.queue.set_shuffle(new_shuffle);
         self.library.cfg.with_state_mut(|s| s.smart_shuffle_visual = new_smart);
 
-        if entering_smart {
-            // Fetch Spotify recommendations and intersperse them into the queue.
+        // Shuffle operates on the current queue, which holds the playlist you
+        // played (playing from a track list replaces the queue with that list).
+        // Recommendations belong to smart shuffle only, so always strip them
+        // first; plain shuffle/off then show just the playlist.
+        self.queue.remove_suggested();
+
+        if new_smart {
+            // Smart shuffle: intersperse fresh Spotify recommendations into the
+            // queue. Runs off-thread (network + locked queue writes).
             let queue = self.queue.clone();
             let spotify = self.spotify.clone();
             let library = self.library.clone();
@@ -259,9 +294,6 @@ impl StatusBar {
                     library.trigger_redraw();
                 }
             });
-        } else if leaving_smart {
-            // Strip recommended tracks added by smart shuffle.
-            self.queue.remove_suggested();
         }
     }
 
@@ -330,7 +362,9 @@ impl View for StatusBar {
         };
 
         // Row 0: top border with centered title (with optional [N] prefix for suggested tracks)
-        let title = self.queue.get_current().as_ref().map(|t| {
+        let current = self.queue.get_current();
+        let is_suggested = current.as_ref().map(|t| t.is_suggested()).unwrap_or(false);
+        let title = current.as_ref().map(|t| {
             let formatted = self.format_track(t);
             if t.is_suggested() {
                 let tag = self.library.cfg.values().statusbar.as_ref()
@@ -374,6 +408,68 @@ impl View for StatusBar {
         printer.with_color(style, |p| {
             p.print((0, 0), &top_border);
         });
+
+        // Shimmer: a soft bright band easing left→right across a recommended
+        // track's title (Claude-CLI style). Overdraws the title glyphs already
+        // painted above; only active for suggested tracks and when enabled.
+        let shimmer_enabled = self
+            .library
+            .cfg
+            .values()
+            .statusbar
+            .as_ref()
+            .and_then(|s| s.suggested_shimmer)
+            .unwrap_or(true);
+        if is_suggested && shimmer_enabled {
+            if let Some(ref t) = title {
+                // Mirror the top_border layout to find the title's start column
+                // and the actually displayed (possibly truncated) text.
+                let full = format!(" {t} ");
+                let (disp, tw) = if full.width() + 2 <= inner_w {
+                    (t.clone(), full.width())
+                } else {
+                    let max_title = inner_w.saturating_sub(4);
+                    let truncated: String = t.chars().take(max_title).collect();
+                    let tw = format!(" {truncated} ").width();
+                    (truncated, tw)
+                };
+                let left_dashes = inner_w.saturating_sub(tw) / 2;
+                let title_start_x = 1 + left_dashes + 1; // ╭ + dashes + leading space
+
+                // Glyphs render in the exact normal title color, except a soft
+                // moving band that brightens toward white. The bright band is
+                // grayscale (white shine) so no themed hue is ever interpolated —
+                // avoids the brown/oversaturated tints a colored blend produced.
+                let base_color = *printer.theme.palette.custom("statusbar").unwrap();
+                let bg = *printer.theme.palette.custom("statusbar_bg").unwrap();
+
+                let chars: Vec<char> = disp.chars().collect();
+                let n = chars.len().max(1) as f32;
+                let phase = (self.shimmer_start.elapsed().as_millis() as f32
+                    % SHIMMER_CYCLE.as_millis() as f32)
+                    / SHIMMER_CYCLE.as_millis() as f32;
+                // Band center sweeps from before the first glyph to past the last.
+                let sigma = (n * 0.18).clamp(1.5, 6.0);
+                let center = phase * (n - 1.0 + 4.0 * sigma) - 2.0 * sigma;
+
+                let mut x = title_start_x;
+                for ch in chars {
+                    let d = x as f32 - title_start_x as f32 - center;
+                    let intensity = (-(d * d) / (2.0 * sigma * sigma)).exp();
+                    let color = if intensity < 0.08 {
+                        base_color
+                    } else {
+                        // 220..=255 grayscale: a subtle white shine at the band.
+                        let v = (220.0 + 35.0 * intensity).round() as u8;
+                        Color::Rgb(v, v, v)
+                    };
+                    let st = ColorStyle::new(ColorType::Color(color), ColorType::Color(bg));
+                    let s = ch.to_string();
+                    printer.with_color(st, |p| p.print((x, 0), &s));
+                    x += ch.width().unwrap_or(1);
+                }
+            }
+        }
 
         // Row 1: top padding row (│ space │)
         printer.with_color(style, |p| {

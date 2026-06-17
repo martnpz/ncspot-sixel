@@ -195,6 +195,10 @@ impl ListItem for Album {
 
     fn play(&mut self, queue: &Queue) {
         self.load_all_tracks(queue.get_spotify());
+        // Record as the shuffle context so the shuffle button can (re)load it.
+        if let Some(id) = self.id.clone() {
+            queue.set_last_opened("album", id);
+        }
 
         if let Some(tracks) = self.tracks.as_ref() {
             let tracks: Vec<Playable> = tracks

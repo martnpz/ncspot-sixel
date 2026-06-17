@@ -98,6 +98,10 @@ impl From<&SimplifiedTrack> for Track {
             .filter_map(|a| a.id.as_ref().map(|a| a.id().to_string()))
             .collect::<Vec<String>>();
 
+        // Recommendation results populate `album` (with cover images); plain
+        // album-track listings leave it empty. Pull cover/album info when present.
+        let album = track.album.as_ref();
+
         Self {
             id: track.id.as_ref().map(|id| id.id().to_string()),
             uri: track.id.as_ref().map(|id| id.uri()).unwrap_or_default(),
@@ -107,10 +111,10 @@ impl From<&SimplifiedTrack> for Track {
             duration: track.duration.num_milliseconds() as u32,
             artists,
             artist_ids,
-            album: None,
-            album_id: None,
+            album: album.map(|a| a.name.clone()),
+            album_id: album.and_then(|a| a.id.as_ref().map(|id| id.id().to_string())),
             album_artists: Vec::new(),
-            cover_url: None,
+            cover_url: album.and_then(|a| a.images.first().map(|img| img.url.clone())),
             url: track.id.as_ref().map(|id| id.url()).unwrap_or_default(),
             added_at: None,
             list_index: 0,
