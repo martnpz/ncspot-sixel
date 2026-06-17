@@ -163,17 +163,28 @@ impl Queue {
 
     /// Add `track` to the end of the queue.
     pub fn append(&self, track: Playable) {
+        self.append_all(vec![track]);
+    }
+
+    /// Append several tracks to the end of the queue in a single locked operation.
+    /// Minimizes lock churn/contention versus calling append() repeatedly, which
+    /// matters when this runs on a background thread alongside playback.
+    pub fn append_all(&self, tracks: Vec<Playable>) {
+        if tracks.is_empty() {
+            return;
+        }
         // Acquire queue.write() first, then random_order.write() — same order as
         // generate_random_order() (which takes queue.read() then random_order.write()).
         // Consistent ordering avoids deadlock when both run concurrently.
         let mut q = self.queue.write().unwrap();
-        q.push(track);
-        let new_index = q.len() - 1;
+        let start = q.len();
+        q.extend(tracks);
+        let end = q.len();
         drop(q); // release before taking random_order so readers aren't blocked longer than needed
 
         let mut random_order = self.random_order.write().unwrap();
         if let Some(order) = random_order.as_mut() {
-            order.push(new_index);
+            order.extend(start..end);
         }
     }
 
@@ -374,31 +385,48 @@ impl Queue {
     /// used, and the next track will actually be played. This should be used
     /// when going to the next entry in the queue is the wanted behavior.
     pub fn next(&self, manual: bool) {
-        let q = self.queue.read().unwrap();
+        // IMPORTANT: never hold a queue read guard across a call to play()/next_index(),
+        // both of which re-acquire queue.read(). std RwLock read locks are not reentrant;
+        // if a writer (e.g. the smart-shuffle append thread) is queued, a second read
+        // acquisition on this thread deadlocks. Extract every fact under a short scope.
         let current = *self.current_track.read().unwrap();
         let repeat = self.cfg.state().repeat;
 
         if repeat == RepeatSetting::RepeatTrack && !manual {
-            if let Some(index) = current
-                && q[index].is_playable()
-            {
-                self.play(index, false, false);
+            if let Some(index) = current {
+                let playable = self
+                    .queue
+                    .read()
+                    .unwrap()
+                    .get(index)
+                    .map(|t| t.is_playable())
+                    .unwrap_or(false);
+                if playable {
+                    self.play(index, false, false);
+                }
             }
         } else if let Some(index) = self.next_index() {
             self.play(index, false, false);
             if repeat == RepeatSetting::RepeatTrack && manual {
                 self.set_repeat(RepeatSetting::RepeatPlaylist);
             }
-        } else if repeat == RepeatSetting::RepeatPlaylist
-            && !q.is_empty()
-            && q.iter().any(|track| track.is_playable())
-        {
-            let random_order = self.random_order.read().unwrap();
-            self.play(
-                random_order.as_ref().map(|o| o[0]).unwrap_or(0),
-                false,
-                false,
-            );
+        } else if repeat == RepeatSetting::RepeatPlaylist {
+            let any_playable = {
+                let q = self.queue.read().unwrap();
+                !q.is_empty() && q.iter().any(|track| track.is_playable())
+            };
+            if any_playable {
+                let index = self
+                    .random_order
+                    .read()
+                    .unwrap()
+                    .as_ref()
+                    .and_then(|o| o.first().copied())
+                    .unwrap_or(0);
+                self.play(index, false, false);
+            } else {
+                self.spotify.stop();
+            }
         } else {
             self.spotify.stop();
         }
@@ -406,22 +434,28 @@ impl Queue {
 
     /// Play the previous item in the queue.
     pub fn previous(&self) {
-        let q = self.queue.read().unwrap();
+        // See next(): do not hold a queue read guard across play()/previous_index().
         let current = *self.current_track.read().unwrap();
         let repeat = self.cfg.state().repeat;
 
         if let Some(index) = self.previous_index() {
             self.play(index, false, false);
-        } else if repeat == RepeatSetting::RepeatPlaylist && !q.is_empty() {
+            return;
+        }
+
+        let queue_len = self.queue.read().unwrap().len();
+        if repeat == RepeatSetting::RepeatPlaylist && queue_len > 0 {
             if self.get_shuffle() {
-                let random_order = self.random_order.read().unwrap();
-                self.play(
-                    random_order.as_ref().map(|o| o[q.len() - 1]).unwrap_or(0),
-                    false,
-                    false,
-                );
+                let index = self
+                    .random_order
+                    .read()
+                    .unwrap()
+                    .as_ref()
+                    .and_then(|o| o.get(queue_len - 1).copied())
+                    .unwrap_or(0);
+                self.play(index, false, false);
             } else {
-                self.play(q.len() - 1, false, false);
+                self.play(queue_len - 1, false, false);
             }
         } else if let Some(index) = current {
             self.play(index, false, false);
@@ -461,12 +495,23 @@ impl Queue {
             }
         }
 
+        drop(q); // release queue.read() before taking random_order.write()
+
         let mut rng = rand::rng();
         random.shuffle(&mut rng);
         order.extend(random);
 
         let mut random_order = self.random_order.write().unwrap();
         *random_order = Some(order);
+    }
+
+    /// Regenerate the shuffle order if shuffle is active, keeping the currently
+    /// playing track first. No-op when shuffle is off. Safe to call from another
+    /// thread alongside playback (navigation is panic-safe against index drift).
+    pub fn reshuffle(&self) {
+        if self.get_shuffle() {
+            self.generate_random_order();
+        }
     }
 
     /// Set the current shuffle behavior.

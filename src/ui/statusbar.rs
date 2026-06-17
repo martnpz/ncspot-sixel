@@ -242,11 +242,20 @@ impl StatusBar {
                 }
                 let seed_refs: Vec<&str> = seed_ids.iter().map(|s| s.as_str()).collect();
                 if let Ok(recs) = spotify.api.recommendations(None, None, Some(seed_refs)) {
-                    for t in &recs.tracks {
-                        let mut track = Track::from(t);
-                        track.is_suggested = true;
-                        queue.append(Playable::Track(track));
-                    }
+                    let tracks: Vec<Playable> = recs
+                        .tracks
+                        .iter()
+                        .map(|t| {
+                            let mut track = Track::from(t);
+                            track.is_suggested = true;
+                            Playable::Track(track)
+                        })
+                        .collect();
+                    // Single locked append minimizes contention with the playback thread.
+                    queue.append_all(tracks);
+                    // Reshuffle so recommendations are interspersed (Spotify-style),
+                    // not stuck at the end of the play order.
+                    queue.reshuffle();
                     library.trigger_redraw();
                 }
             });

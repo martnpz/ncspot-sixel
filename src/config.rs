@@ -718,9 +718,9 @@ mod tests {
             toml::from_str(example).expect("config.toml.example must parse into ConfigValues");
 
         let layout = values.layout.expect("example should define [layout]");
-        assert_eq!(layout.columns.len(), 3);
+        assert_eq!(layout.columns.len(), 2);
         assert_eq!(layout.columns[0].panes, vec!["browser"]);
-        assert_eq!(layout.columns[2].panes, vec!["info", "lyrics"]);
+        assert_eq!(layout.columns[1].panes, vec!["info", "lyrics"]);
         let browser = layout.browser.expect("example should define [layout.browser]");
         assert_eq!(browser.default_section.as_deref(), Some("playlists"));
         assert_eq!(browser.sections.map(|s| s.len()), Some(5));
