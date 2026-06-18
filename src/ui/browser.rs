@@ -382,11 +382,16 @@ impl BrowserView {
     }
 
     pub fn set_section(&mut self, section: BrowserSection) {
-        // All section list views share the same terminal area. Invalidate
-        // their slot caches so the incoming section re-emits its sixels
-        // from scratch instead of skipping because a stale position matches.
+        // All section list views share the same terminal area. First blank the
+        // outgoing section's thumbnails (on_leave erases their sixels from the
+        // terminal and clears the slot cache) so they don't linger as artifacts
+        // where the incoming section won't overdraw. Then invalidate the
+        // thumbnail sections' slot caches so the incoming section re-emits its
+        // sixels from scratch instead of skipping because a stale position
+        // matches.
         #[cfg(feature = "cover")]
         {
+            self.section_view_mut().on_leave();
             self.playlists.invalidate_slots();
             self.albums.invalidate_slots();
         }

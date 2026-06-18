@@ -504,8 +504,15 @@ impl ViewExt for PaneLayoutView {
     }
 
     fn on_leave(&self) {
-        if let Some(pane) = self.focused_pane() {
-            pane.top().on_leave();
+        // Every pane can be showing sixel graphics (browser thumbnails, the
+        // info-pane cover, …) at once, so blank them all — not just the
+        // focused one — or their covers linger as artifacts after a screen
+        // switch (F1–F4). on_leave also clears each pane's slot cache so the
+        // panes re-emit cleanly when this screen is shown again.
+        for column in &self.columns {
+            for pane in &column.panes {
+                pane.top().on_leave();
+            }
         }
     }
 
