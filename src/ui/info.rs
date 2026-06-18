@@ -77,6 +77,7 @@ enum NowPlayingAction {
     AddToQueue,
     AddToPlaylist,
     RemoveFromPlaylist,
+    RemoveRecommendation,
     #[cfg(feature = "share_clipboard")]
     Share,
 }
@@ -214,6 +215,14 @@ impl InfoView {
                 items.push((format!(" {icon_add_to_playlist}Add to playlist "), NowPlayingAction::AddToPlaylist));
                 items.push((format!(" {icon_remove}Remove from playlist "), NowPlayingAction::RemoveFromPlaylist));
             }
+            // Only for tracks added by smart shuffle / recommendations.
+            if playable.is_suggested() {
+                let icon_remove_rec = cfg.icon(IconKind::MenuRemoveRecommendation);
+                items.push((
+                    format!(" {icon_remove_rec}Remove recommendation "),
+                    NowPlayingAction::RemoveRecommendation,
+                ));
+            }
             #[cfg(feature = "share_clipboard")]
             if playable.as_listitem().share_url().is_some() {
                 items.push((format!(" {icon_share}Share "), NowPlayingAction::Share));
@@ -280,6 +289,14 @@ impl InfoView {
                                 );
                                 s.add_layer(dialog);
                             }
+                        }
+                    }
+                    NowPlayingAction::RemoveRecommendation => {
+                        // Spotify's public Web API has no "show fewer like this" /
+                        // dislike endpoint, so the best-effort behaviour is to drop
+                        // the recommended track from the queue.
+                        if let Some(index) = queue_cb.get_current_index() {
+                            queue_cb.remove(index);
                         }
                     }
                     #[cfg(feature = "share_clipboard")]

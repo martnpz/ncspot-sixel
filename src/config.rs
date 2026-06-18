@@ -196,6 +196,7 @@ pub struct IconsConfig {
     pub menu_add_to_queue: Option<String>,
     pub menu_add_to_playlist: Option<String>,
     pub menu_remove_from_playlist: Option<String>,
+    pub menu_remove_recommendation: Option<String>,
     pub menu_share: Option<String>,
 }
 
@@ -234,6 +235,7 @@ pub enum IconKind {
     MenuAddToQueue,
     MenuAddToPlaylist,
     MenuRemoveFromPlaylist,
+    MenuRemoveRecommendation,
     MenuShare,
 }
 
@@ -268,6 +270,7 @@ impl IconKind {
             Self::MenuAddToQueue => ("\u{f04b} ", "> "),
             Self::MenuAddToPlaylist => ("\u{f0fe} ", "+ "),
             Self::MenuRemoveFromPlaylist => ("\u{f146} ", "- "),
+            Self::MenuRemoveRecommendation => ("\u{f0a76} ", "✗ "),
             Self::MenuShare => ("\u{f064} ", "↗ "),
         }
     }
@@ -589,6 +592,7 @@ impl Config {
                 IconKind::MenuAddToQueue => &icons.menu_add_to_queue,
                 IconKind::MenuAddToPlaylist => &icons.menu_add_to_playlist,
                 IconKind::MenuRemoveFromPlaylist => &icons.menu_remove_from_playlist,
+                IconKind::MenuRemoveRecommendation => &icons.menu_remove_recommendation,
                 IconKind::MenuShare => &icons.menu_share,
             }
             .clone()

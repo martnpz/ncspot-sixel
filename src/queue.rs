@@ -77,53 +77,41 @@ impl Queue {
     /// The index of the next item in `self.queue` that should be played. None
     /// if at the end of the queue.
     pub fn next_index(&self) -> Option<usize> {
-        match *self.current_track.read().unwrap() {
-            Some(mut index) => {
-                let random_order = self.random_order.read().unwrap();
-                if let Some(order) = random_order.as_ref() {
-                    index = order.iter().position(|&i| i == index)?;
-                }
-
-                let next_pos = index + 1;
-                if next_pos < self.queue.read().unwrap().len() {
-                    if let Some(order) = random_order.as_ref() {
-                        // Use get() — order and queue can briefly disagree while a
-                        // background append() is between its queue.write() and
-                        // random_order.write() steps.
-                        Some(*order.get(next_pos)?)
-                    } else {
-                        Some(next_pos)
-                    }
-                } else {
-                    None
-                }
-            }
-            None => None,
+        // Snapshot each lock independently and release it before taking the next,
+        // so this never holds current_track + random_order + queue read guards at
+        // once (which can wedge against a queued writer under RwLock writer-priority).
+        let mut index = (*self.current_track.read().unwrap())?;
+        let order = self.random_order.read().unwrap().clone();
+        if let Some(order) = order.as_ref() {
+            index = order.iter().position(|&i| i == index)?;
+        }
+        let next_pos = index + 1;
+        if next_pos >= self.queue.read().unwrap().len() {
+            return None;
+        }
+        match order.as_ref() {
+            // order and queue can briefly disagree while a background append() is
+            // between its queue.write() and random_order.write() steps.
+            Some(order) => order.get(next_pos).copied(),
+            None => Some(next_pos),
         }
     }
 
     /// The index of the previous item in `self.queue` that should be played.
     /// None if at the start of the queue.
     pub fn previous_index(&self) -> Option<usize> {
-        match *self.current_track.read().unwrap() {
-            Some(mut index) => {
-                let random_order = self.random_order.read().unwrap();
-                if let Some(order) = random_order.as_ref() {
-                    index = order.iter().position(|&i| i == index)?;
-                }
-
-                if index > 0 {
-                    let prev_pos = index - 1;
-                    if let Some(order) = random_order.as_ref() {
-                        Some(*order.get(prev_pos)?)
-                    } else {
-                        Some(prev_pos)
-                    }
-                } else {
-                    None
-                }
-            }
-            None => None,
+        let mut index = (*self.current_track.read().unwrap())?;
+        let order = self.random_order.read().unwrap().clone();
+        if let Some(order) = order.as_ref() {
+            index = order.iter().position(|&i| i == index)?;
+        }
+        if index == 0 {
+            return None;
+        }
+        let prev_pos = index - 1;
+        match order.as_ref() {
+            Some(order) => order.get(prev_pos).copied(),
+            None => Some(prev_pos),
         }
     }
 
@@ -523,18 +511,19 @@ impl Queue {
 
     /// (Re)generate the random shuffle order.
     fn generate_random_order(&self) {
-        let q = self.queue.read().unwrap();
-        let mut order: Vec<usize> = Vec::with_capacity(q.len());
-        let mut random: Vec<usize> = (0..q.len()).collect();
+        // Snapshot lengths/indices under short, non-overlapping locks so we never
+        // hold queue + current_track (and later random_order) guards together.
+        let len = self.queue.read().unwrap().len();
+        let current = *self.current_track.read().unwrap();
 
-        if let Some(current) = *self.current_track.read().unwrap() {
-            if current < q.len() {
+        let mut order: Vec<usize> = Vec::with_capacity(len);
+        let mut random: Vec<usize> = (0..len).collect();
+        if let Some(current) = current {
+            if current < len {
                 order.push(current);
                 random.remove(current);
             }
         }
-
-        drop(q); // release queue.read() before taking random_order.write()
 
         let mut rng = rand::rng();
         random.shuffle(&mut rng);

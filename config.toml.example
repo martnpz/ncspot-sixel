@@ -193,6 +193,7 @@ align = "center"
 #menu_add_to_queue = "> "
 #menu_add_to_playlist = "+ "
 #menu_remove_from_playlist = "- "
+#menu_remove_recommendation = "✗ "  # "Remove recommendation" (recommended songs only)
 #menu_share = "↗ "
 
 ###############################################################################
