@@ -117,13 +117,28 @@ pub struct ConfigValues {
 pub struct StatusbarConfig {
     /// Rows occupied by the progress bar. 1 = one line (default), 2-3 = taller.
     pub height: Option<u8>,
-    /// Progress bar character style: `"thin"` (━/┉, default), `"thick"` (█/░),
-    /// or `"rounded"` (█/░, nerd font variant).
+    /// Progress bar character style: `"square"` (█/░, default), `"thin"` (━/┉),
+    /// or `"rounded"` (█/░ with nerd-font half-circle end caps).
     pub style: Option<String>,
-    /// Opening delimiter for control buttons. Default `"[ "`.
+    /// Left end cap for the `"rounded"` bar style.
+    /// Default `""` (nf-ple-left_half_circle_thick).
+    pub progress_cap_left: Option<String>,
+    /// Right end cap for the `"rounded"` bar style.
+    /// Default `""` (nf-ple-right_half_circle_thick).
+    pub progress_cap_right: Option<String>,
+    /// Controls row button style: `"square"` (default, `button_open`/`button_close`
+    /// delimiters) or `"rounded"` (nerd-font half-circle pill around each icon).
+    pub controls_style: Option<String>,
+    /// Opening delimiter for control buttons (`"square"` style). Default `"[ "`.
     pub button_open: Option<String>,
-    /// Closing delimiter for control buttons. Default `" ]"`.
+    /// Closing delimiter for control buttons (`"square"` style). Default `" ]"`.
     pub button_close: Option<String>,
+    /// Left pill cap for the `"rounded"` controls style.
+    /// Default `""` (nf-ple-left_half_circle_thick).
+    pub controls_cap_left: Option<String>,
+    /// Right pill cap for the `"rounded"` controls style.
+    /// Default `""` (nf-ple-right_half_circle_thick).
+    pub controls_cap_right: Option<String>,
     /// Text (or icon) prepended to the title in the top border when the current
     /// track comes from Spotify recommendations. Set to `""` to disable.
     /// Default `"[N] "`.
@@ -390,6 +405,12 @@ pub struct ConfigTheme {
     pub statusbar_controls: Option<String>,
     /// Background color for the controls row. Falls back to `statusbar_bg`.
     pub statusbar_controls_bg: Option<String>,
+    /// Icon color for an active/pressed control button — enabled shuffle/repeat,
+    /// or the brief blink when play/prev/next is clicked. Default white.
+    pub statusbar_controls_active: Option<String>,
+    /// Pill background behind each icon in the `"rounded"` controls style.
+    /// Default a gray (light black).
+    pub statusbar_controls_button_bg: Option<String>,
     pub cmdline: Option<String>,
     pub cmdline_bg: Option<String>,
     pub search_match: Option<String>,

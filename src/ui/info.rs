@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
+use std::time::{Duration, Instant};
 
 use cursive::event::{Event, EventResult, EventTrigger, Key, MouseEvent};
 use cursive::theme::{ColorStyle, ColorType, Effect, PaletteColor, Style};
@@ -36,6 +37,11 @@ pub type GenresCache = Arc<RwLock<HashMap<String, Vec<String>>>>;
 
 /// Number of rows the metadata block occupies (incl. one spacing row).
 const METADATA_HEIGHT: usize = 4;
+
+/// Scroll the "Now Playing" title as a marquee once it reaches this many chars.
+const TITLE_MARQUEE_MIN: usize = 28;
+/// Time per one-character marquee step (also the redraw cadence while scrolling).
+const MARQUEE_STEP: Duration = Duration::from_millis(220);
 
 /// Fetch the genres for `playable`'s first artist into `cache`, off-thread.
 /// Call this on track changes; cached artists are not re-fetched.
@@ -83,6 +89,8 @@ pub struct InfoView {
     genres: GenresCache,
     last_offset: RwLock<Vec2>,
     last_content_w: RwLock<usize>,
+    /// Time origin for the long-title marquee animation.
+    marquee_start: Instant,
     #[cfg(feature = "cover")]
     cover_pause: Arc<AtomicBool>,
     #[cfg(feature = "cover")]
@@ -97,6 +105,30 @@ impl InfoView {
         genres: GenresCache,
         #[cfg(feature = "cover")] cover: CoverView,
     ) -> Self {
+        // Drive the title marquee: while the current title is long enough to
+        // scroll, nudge a redraw each step; otherwise poll slowly (near-free).
+        {
+            let queue = queue.clone();
+            let library = library.clone();
+            std::thread::spawn(move || {
+                loop {
+                    let len = queue
+                        .get_current()
+                        .map(|p| match &p {
+                            Playable::Track(t) => t.title.chars().count(),
+                            Playable::Episode(e) => e.name.chars().count(),
+                        })
+                        .unwrap_or(0);
+                    if len >= TITLE_MARQUEE_MIN {
+                        library.trigger_redraw();
+                        std::thread::sleep(MARQUEE_STEP);
+                    } else {
+                        std::thread::sleep(Duration::from_millis(400));
+                    }
+                }
+            });
+        }
+
         Self {
             queue,
             library,
@@ -104,6 +136,7 @@ impl InfoView {
             genres,
             last_offset: RwLock::new(Vec2::zero()),
             last_content_w: RwLock::new(0),
+            marquee_start: Instant::now(),
             #[cfg(feature = "cover")]
             cover_pause: cover.pause_handle(),
             #[cfg(feature = "cover")]
@@ -319,16 +352,27 @@ impl View for InfoView {
         let center = |text: &str| (printer.size.x.saturating_sub(text.width())) / 2;
         let y = cover_height + 1;
 
-        printer.with_style(
-            Style::from(ColorStyle::title_primary()).combine(Effect::Bold),
-            |printer| printer.print((center(&title), y), &title),
-        );
+        let title_style = Style::from(ColorStyle::title_primary()).combine(Effect::Bold);
+        if title.chars().count() >= TITLE_MARQUEE_MIN && printer.size.x > 0 {
+            // Long titles scroll left → right as a seamless loop.
+            let scroll: Vec<char> = format!("{title}    ").chars().collect();
+            let n = scroll.len();
+            let window = printer.size.x;
+            let step =
+                (self.marquee_start.elapsed().as_millis() / MARQUEE_STEP.as_millis().max(1)) as usize;
+            // Increasing start offset moves the text leftward (right → left).
+            let off = step % n;
+            let visible: String = (0..window).map(|i| scroll[(off + i) % n]).collect();
+            printer.with_style(title_style, |printer| printer.print((0, y), &visible));
+        } else {
+            printer.with_style(title_style, |printer| printer.print((center(&title), y), &title));
+        }
         printer.with_color(ColorStyle::primary(), |printer| {
             printer.print((center(&artists), y + 1), &artists);
         });
         printer.with_style(
             Style::from(ColorStyle::new(
-                ColorType::Palette(PaletteColor::Secondary),
+                ColorType::Palette(PaletteColor::Background),
                 ColorType::Palette(PaletteColor::Background),
             ))
             .combine(Effect::Dim),

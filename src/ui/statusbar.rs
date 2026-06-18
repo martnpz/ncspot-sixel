@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use cursive::Printer;
 use cursive::align::HAlign;
 use cursive::event::{Event, EventResult, MouseButton, MouseEvent};
-use cursive::theme::{Color, ColorStyle, ColorType, PaletteColor};
+use cursive::theme::{Color, ColorStyle, ColorType, Effect, PaletteColor, Style};
 use cursive::traits::View;
 use cursive::vec::Vec2;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -22,6 +22,27 @@ use crate::utils::ms_to_hms;
 const SHIMMER_CYCLE: Duration = Duration::from_millis(1800);
 /// Redraw interval while a suggested track is playing (~6 fps).
 const SHIMMER_FRAME: Duration = Duration::from_millis(160);
+/// How long a clicked play/prev/next button flashes the active color.
+const BLINK: Duration = Duration::from_millis(140);
+
+/// A clickable control-row button.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ControlButton {
+    Play,
+    Prev,
+    Next,
+    Shuffle,
+    Repeat,
+}
+
+/// A laid-out control button: its icon, active state, and x-range `[start, end)`.
+struct CtrlBtn {
+    kind: ControlButton,
+    icon: String,
+    active: bool,
+    start: usize,
+    end: usize,
+}
 
 pub struct StatusBar {
     queue: Arc<Queue>,
@@ -30,6 +51,8 @@ pub struct StatusBar {
     last_size: Vec2,
     /// Time origin for the suggested-track title shimmer animation.
     shimmer_start: Instant,
+    /// Last clicked play/prev/next button and when, for the press blink.
+    blink: Option<(ControlButton, Instant)>,
 }
 
 impl StatusBar {
@@ -58,7 +81,14 @@ impl StatusBar {
             });
         }
 
-        Self { queue, spotify, library, last_size: Vec2::new(0, 0), shimmer_start: Instant::now() }
+        Self {
+            queue,
+            spotify,
+            library,
+            last_size: Vec2::new(0, 0),
+            shimmer_start: Instant::now(),
+            blink: None,
+        }
     }
 
     fn bar_height(&self) -> usize {
@@ -99,19 +129,39 @@ impl StatusBar {
         Playable::format(t, &format, &self.library)
     }
 
-    fn bar_chars(&self) -> (&'static str, &'static str) {
-        let style = self
-            .library
+    fn bar_style(&self) -> String {
+        self.library
             .cfg
             .values()
             .statusbar
             .as_ref()
             .and_then(|s| s.style.clone())
-            .unwrap_or_else(|| "thin".to_string());
-        match style.as_str() {
-            "thick" | "rounded" => ("█", "░"),
-            _ => ("━", "┉"),
+            .unwrap_or_else(|| "square".to_string())
+    }
+
+    fn bar_chars(&self) -> (&'static str, &'static str) {
+        match self.bar_style().as_str() {
+            "thin" => ("━", "┉"),
+            // "square" (default, █/░); "rounded" adds caps; "thick" legacy alias.
+            _ => ("█", "░"),
         }
+    }
+
+    /// End caps for the `"rounded"` style: `(left, right)`. None for other styles.
+    fn bar_caps(&self) -> Option<(String, String)> {
+        if self.bar_style() != "rounded" {
+            return None;
+        }
+        let sb = self.library.cfg.values().statusbar.clone();
+        let left = sb
+            .as_ref()
+            .and_then(|s| s.progress_cap_left.clone())
+            .unwrap_or_else(|| "\u{e0b6}".to_string());
+        let right = sb
+            .as_ref()
+            .and_then(|s| s.progress_cap_right.clone())
+            .unwrap_or_else(|| "\u{e0b4}".to_string());
+        Some((left, right))
     }
 
     fn shuffle_icon(&self) -> String {
@@ -145,23 +195,50 @@ impl StatusBar {
             .unwrap_or_else(|| " ]".to_string())
     }
 
-    fn btn_wrap(&self, icon: &str) -> String {
-        format!("{}{}{}", self.btn_open(), icon, self.btn_close())
+    fn controls_style(&self) -> String {
+        self.library.cfg.values().statusbar.as_ref()
+            .and_then(|s| s.controls_style.clone())
+            .unwrap_or_else(|| "square".to_string())
     }
 
-    fn repeat_btn_str(&self) -> String {
-        let open = self.btn_open();
-        let close = self.btn_close();
+    fn controls_cap_left(&self) -> String {
+        self.library.cfg.values().statusbar.as_ref()
+            .and_then(|s| s.controls_cap_left.clone())
+            .unwrap_or_else(|| "\u{e0b6}".to_string())
+    }
+
+    fn controls_cap_right(&self) -> String {
+        self.library.cfg.values().statusbar.as_ref()
+            .and_then(|s| s.controls_cap_right.clone())
+            .unwrap_or_else(|| "\u{e0b4}".to_string())
+    }
+
+    /// Left/right button decorations for the current controls style.
+    fn controls_deco(&self) -> (String, String) {
+        if self.controls_style() == "rounded" {
+            (self.controls_cap_left(), self.controls_cap_right())
+        } else {
+            (self.btn_open(), self.btn_close())
+        }
+    }
+
+    fn repeat_icon_str(&self) -> String {
         match self.queue.get_repeat() {
             RepeatSetting::RepeatTrack => {
-                let icon = self.library.cfg.icon(IconKind::RepeatTrack);
-                format!("{}{}1{}", open, icon.trim_end(), close)
+                format!("{}1", self.library.cfg.icon(IconKind::RepeatTrack).trim_end())
             }
-            _ => {
-                let icon = self.repeat_icon();
-                format!("{}{}{}", open, icon.trim_end(), close)
-            }
+            _ => self.repeat_icon().to_string(),
         }
+    }
+
+    /// Record a press blink for `btn` and schedule a redraw to clear it.
+    fn start_blink(&mut self, btn: ControlButton) {
+        self.blink = Some((btn, Instant::now()));
+        let library = self.library.clone();
+        thread::spawn(move || {
+            thread::sleep(BLINK);
+            library.trigger_redraw();
+        });
     }
 
     fn volume_pct(&self) -> u16 {
@@ -174,70 +251,104 @@ impl StatusBar {
         let time = match self.queue.get_current() {
             Some(ref t) => {
                 let e = ms_to_hms(elapsed.as_millis().try_into().unwrap_or(0));
-                format!("{}/{}", e, t.duration_str())
+                format!("{} / {}", e, t.duration_str())
             }
             None => String::new(),
         };
         let vol = format!("{}%", self.volume_pct());
         if time.is_empty() {
-            format!("| {}", vol)
+            format!("|   {}", vol)
         } else {
-            format!("{} | {}", time, vol)
+            format!("󰔚 {} | 󰖀  {}", time, vol)
         }
     }
 
-    /// Build the controls string (left side of controls row) and return it
-    /// along with the x-ranges for each clickable element.
-    /// All ranges are relative to the inner content (after the leading │).
-    fn controls_layout(&self) -> ControlsLayout {
-        let play = self.playback_indicator();
-        let prev = self.btn_wrap(self.library.cfg.icon(IconKind::PlayerPrev).trim_end());
-        let next = self.btn_wrap(self.library.cfg.icon(IconKind::PlayerNext).trim_end());
-        let shuffle = self.btn_wrap(self.shuffle_icon().trim_end());
-        let repeat = self.repeat_btn_str();
+    /// Lay out the control buttons left to right, computing each one's x-range.
+    /// Decoration width (brackets or pill caps) depends on the controls style.
+    fn controls_layout(&self) -> Vec<CtrlBtn> {
+        let (deco_l, deco_r) = self.controls_deco();
+        let deco_w = deco_l.width() + deco_r.width();
 
+        let shuffle_on = self.library.cfg.state().shuffle;
+        let repeat_on = self.queue.get_repeat() != RepeatSetting::None;
+
+        let specs: [(ControlButton, String, bool); 5] = [
+            (ControlButton::Play, self.playback_indicator().to_string(), false),
+            (ControlButton::Prev, self.library.cfg.icon(IconKind::PlayerPrev).to_string(), false),
+            (ControlButton::Next, self.library.cfg.icon(IconKind::PlayerNext).to_string(), false),
+            (ControlButton::Shuffle, self.shuffle_icon().to_string(), shuffle_on),
+            (ControlButton::Repeat, self.repeat_icon_str(), repeat_on),
+        ];
+
+        let mut out = Vec::with_capacity(specs.len());
         let mut x: usize = 2; // after leading │ + 1 cell padding
+        for (i, (kind, icon, active)) in specs.into_iter().enumerate() {
+            let start = x;
+            let end = x + deco_w + icon.width();
+            out.push(CtrlBtn { kind, icon, active, start, end });
+            // Gaps after each button: play␣␣prev␣next␣␣shuffle␣␣repeat
+            let gap = match i {
+                0 => 2, // after play
+                1 => 1, // after prev
+                2 => 2, // after next
+                3 => 2, // after shuffle
+                _ => 1,
+            };
+            x = end + gap;
+        }
+        out
+    }
 
-        let play_start = x;
-        x += play.width();
-        let play_end = x;
+    /// Draw the control buttons onto the controls row.
+    fn draw_controls(&self, printer: &Printer, row: usize, btns: &[CtrlBtn]) {
+        let rounded = self.controls_style() == "rounded";
+        let (deco_l, deco_r) = self.controls_deco();
 
-        x += 1; // space
+        // Normal icon color follows the pane island style (TitleSecondary).
+        let fg = printer.theme.palette[PaletteColor::TitlePrimary];
+        let active_fg = *printer.theme.palette.custom("statusbar_controls_active").unwrap();
+        let pill_bg = *printer.theme.palette.custom("statusbar_controls_button_bg").unwrap();
+        let row_bg = *printer.theme.palette.custom("statusbar_controls_bg").unwrap();
 
-        let prev_start = x;
-        x += prev.width();
-        let prev_end = x;
+        // Active blink (play/prev/next), still within the blink window.
+        let blink = self.blink.filter(|(_, t)| t.elapsed() < BLINK).map(|(b, _)| b);
 
-        x += 1; // space
+        for b in btns {
+            // When a button is "on" the icon's fg/bg swap (inverted look):
+            //   - play/prev/next: briefly, on click, using the active color (blink)
+            //   - shuffle/repeat: while enabled, using the normal fg color
+            let highlight = match b.kind {
+                ControlButton::Shuffle | ControlButton::Repeat => b.active.then_some(fg),
+                _ => (blink == Some(b.kind)).then_some(active_fg),
+            };
 
-        let next_start = x;
-        x += next.width();
-        let next_end = x;
-
-        x += 1; // space
-
-        let shuffle_start = x;
-        x += shuffle.width();
-        let shuffle_end = x;
-
-        x += 2; // double space
-
-        let repeat_start = x;
-        x += repeat.width();
-        let repeat_end = x;
-
-        let left_str = format!(
-            "{} {} {} {}  {}",
-            play, prev, next, shuffle, repeat
-        );
-
-        let _ = (play_start, play_end);
-        ControlsLayout {
-            left_str,
-            prev: (prev_start, prev_end),
-            next: (next_start, next_end),
-            shuffle: (shuffle_start, shuffle_end),
-            repeat: (repeat_start, repeat_end),
+            if rounded {
+                // Normally the pill body is pill_bg with the icon in fg. When lit,
+                // the body becomes the highlight color and the glyph inverts to it.
+                let (body, glyph_fg) = match highlight {
+                    Some(hl) => (hl, pill_bg),
+                    None => (pill_bg, fg),
+                };
+                let deco_style =
+                    ColorStyle::new(ColorType::Color(body), ColorType::Color(row_bg));
+                let icon_style =
+                    ColorStyle::new(ColorType::Color(glyph_fg), ColorType::Color(body));
+                printer.with_color(deco_style, |p| p.print((b.start, row), &deco_l));
+                let ix = b.start + deco_l.width();
+                printer.with_color(icon_style, |p| p.print((ix, row), &b.icon));
+                printer.with_color(deco_style, |p| {
+                    p.print((ix + b.icon.width(), row), &deco_r)
+                });
+            } else {
+                // Square: swap glyph fg with the row background when lit.
+                let (glyph_fg, bg) = match highlight {
+                    Some(hl) => (row_bg, hl),
+                    None => (fg, row_bg),
+                };
+                let st = ColorStyle::new(ColorType::Color(glyph_fg), ColorType::Color(bg));
+                let s = format!("{}{}{}", deco_l, b.icon, deco_r);
+                printer.with_color(st, |p| p.print((b.start, row), &s));
+            }
         }
     }
 
@@ -307,14 +418,6 @@ impl StatusBar {
     }
 }
 
-struct ControlsLayout {
-    left_str: String,
-    prev: (usize, usize),
-    next: (usize, usize),
-    shuffle: (usize, usize),
-    repeat: (usize, usize),
-}
-
 impl View for StatusBar {
     fn draw(&self, printer: &Printer<'_, '_>) {
         if printer.size.x == 0 {
@@ -331,12 +434,15 @@ impl View for StatusBar {
             ),
             ColorType::Palette(PaletteColor::Background),
         );
+        // Frame + title follow the pane island border color (TitleSecondary),
+        // so the player island matches the other panes.
         let style = ColorStyle::new(
-            ColorType::Color(*printer.theme.palette.custom("statusbar").unwrap()),
+            ColorType::Palette(PaletteColor::TitlePrimary),
             ColorType::Color(*printer.theme.palette.custom("statusbar_bg").unwrap()),
         );
+        // Controls row text (time/volume) follows the pane island style too.
         let style_controls = ColorStyle::new(
-            ColorType::Color(*printer.theme.palette.custom("statusbar_controls").unwrap()),
+            ColorType::Palette(PaletteColor::TitlePrimary),
             ColorType::Color(*printer.theme.palette.custom("statusbar_controls_bg").unwrap()),
         );
 
@@ -440,7 +546,7 @@ impl View for StatusBar {
                 // moving band that brightens toward white. The bright band is
                 // grayscale (white shine) so no themed hue is ever interpolated —
                 // avoids the brown/oversaturated tints a colored blend produced.
-                let base_color = *printer.theme.palette.custom("statusbar").unwrap();
+                let base_color = printer.theme.palette[PaletteColor::TitleSecondary];
                 let bg = *printer.theme.palette.custom("statusbar_bg").unwrap();
 
                 let chars: Vec<char> = disp.chars().collect();
@@ -479,6 +585,17 @@ impl View for StatusBar {
         });
 
         // Rows 2..=bar_height+1: progress bar
+        let caps = self.bar_caps();
+        let has_current = current.is_some();
+        // Number of filled cells across the bar's content region [bar_x, bar_x+bar_w).
+        let filled_cells = if has_current {
+            (duration_fill + 1).min(bar_w)
+        } else {
+            0
+        };
+        // Empty caps use the shadow color dimmed, so a solid cap glyph doesn't
+        // read brighter than the partial-fill ░ track next to it.
+        let dim_empty = Style::from(style_bar_bg).combine(Effect::Dim);
         for row in 2..=bar_height + 1 {
             printer.with_color(style, |p| {
                 p.print((0, row), "│");
@@ -486,16 +603,40 @@ impl View for StatusBar {
                 p.print((bar_x + bar_w, row), " ");
                 p.print((printer.size.x.saturating_sub(1), row), "│");
             });
-            printer.with_color(style_bar_bg, |p| {
-                p.print((bar_x, row), &empty_char.repeat(bar_w));
-            });
-            if self.queue.get_current().is_some() {
-                printer.with_color(style_bar, |p| {
-                    p.print(
-                        (bar_x, row),
-                        &filled_char.repeat((duration_fill + 1).min(bar_w)),
-                    );
+
+            if let Some((left, right)) = &caps {
+                // Rounded: the caps are the FIRST and LAST cells of the bar, so
+                // they're part of the seekable region (clicking the left cap
+                // seeks to the start) rather than outside decoration.
+                for i in 0..bar_w {
+                    let col = bar_x + i;
+                    let is_filled = i < filled_cells;
+                    let glyph: &str = if i == 0 {
+                        left.as_str()
+                    } else if i + 1 == bar_w {
+                        right.as_str()
+                    } else if is_filled {
+                        filled_char
+                    } else {
+                        empty_char
+                    };
+                    if is_filled {
+                        printer.with_color(style_bar, |p| p.print((col, row), glyph));
+                    } else if i == 0 || i + 1 == bar_w {
+                        printer.with_style(dim_empty, |p| p.print((col, row), glyph));
+                    } else {
+                        printer.with_color(style_bar_bg, |p| p.print((col, row), glyph));
+                    }
+                }
+            } else {
+                printer.with_color(style_bar_bg, |p| {
+                    p.print((bar_x, row), &empty_char.repeat(bar_w));
                 });
+                if has_current {
+                    printer.with_color(style_bar, |p| {
+                        p.print((bar_x, row), &filled_char.repeat(filled_cells));
+                    });
+                }
             }
         }
 
@@ -519,9 +660,7 @@ impl View for StatusBar {
         });
 
         let cl = self.controls_layout();
-        printer.with_color(style_controls, |p| {
-            p.print((2, ctrl_row), &cl.left_str);
-        });
+        self.draw_controls(printer, ctrl_row, &cl);
 
         // Right-align time/volume with 1-cell right padding before │
         let right = self.right_str();
@@ -593,18 +732,24 @@ impl View for StatusBar {
                 if row == bar_height + 3 {
                     let cl = self.controls_layout();
                     let x = position.x;
-
-                    if x >= cl.prev.0 && x < cl.prev.1 {
-                        self.queue.previous();
-                    } else if x >= cl.next.0 && x < cl.next.1 {
-                        self.queue.next(true);
-                    } else if x >= cl.shuffle.0 && x < cl.shuffle.1 {
-                        self.cycle_shuffle();
-                    } else if x >= cl.repeat.0 && x < cl.repeat.1 {
-                        self.cycle_repeat();
-                    } else {
-                        // Click on play area or empty space → toggle pause
-                        self.queue.toggleplayback();
+                    let hit = cl.iter().find(|b| x >= b.start && x < b.end).map(|b| b.kind);
+                    match hit {
+                        Some(ControlButton::Prev) => {
+                            self.queue.previous();
+                            self.start_blink(ControlButton::Prev);
+                        }
+                        Some(ControlButton::Next) => {
+                            self.queue.next(true);
+                            self.start_blink(ControlButton::Next);
+                        }
+                        Some(ControlButton::Shuffle) => self.cycle_shuffle(),
+                        Some(ControlButton::Repeat) => self.cycle_repeat(),
+                        // Play button or empty space → toggle playback (play blinks).
+                        Some(ControlButton::Play) => {
+                            self.queue.toggleplayback();
+                            self.start_blink(ControlButton::Play);
+                        }
+                        None => self.queue.toggleplayback(),
                     }
                     return EventResult::Consumed(None);
                 }

@@ -104,6 +104,16 @@ pub fn load(theme_cfg: &Option<ConfigTheme>) -> Theme {
         .and_then(|s| resolve_color(s, &palette))
         .unwrap_or(statusbar_bg_color);
     palette.set_color("statusbar_controls_bg", c);
+
+    let c = theme_cfg.as_ref().and_then(|t| t.statusbar_controls_active.as_deref())
+        .and_then(|s| resolve_color(s, &palette))
+        .unwrap_or(Light(White));
+    palette.set_color("statusbar_controls_active", c);
+
+    let c = theme_cfg.as_ref().and_then(|t| t.statusbar_controls_button_bg.as_deref())
+        .and_then(|s| resolve_color(s, &palette))
+        .unwrap_or(Light(Black));
+    palette.set_color("statusbar_controls_button_bg", c);
     palette.set_color("cmdline", load_color!(theme_cfg, cmdline, TerminalDefault));
     palette.set_color(
         "cmdline_bg",

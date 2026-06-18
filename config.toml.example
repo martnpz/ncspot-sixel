@@ -122,13 +122,23 @@ genres = 2
 # # Rows for the progress bar. 1 = one thin line (default), 2-3 = taller bar.
 # height = 1
 # # Progress bar character style:
-# #   "thin"    — ━/┉ (default)
-# #   "thick"   — █/░
-# #   "rounded" — █/░ (nerd font variant)
-# style = "thin"
-# # Delimiters wrapped around each button in the controls row.
+# #   "square"  — █/░ (default)
+# #   "thin"    — ━/┉
+# #   "rounded" — █/░ with nerd-font half-circle end caps
+# style = "square"
+# # End caps for the "rounded" style (nerd font glyphs).
+# progress_cap_left  = ""   # nf-ple-left_half_circle_thick
+# progress_cap_right = ""   # nf-ple-right_half_circle_thick
+# # Controls row button style:
+# #   "square"  — bracket delimiters below (default)
+# #   "rounded" — nerd-font half-circle pill around each icon
+# controls_style = "square"
+# # Delimiters wrapped around each button ("square" style).
 # button_open  = "[ "
 # button_close = " ]"
+# # Pill caps for the "rounded" controls style (nerd font glyphs).
+# controls_cap_left  = ""   # nf-ple-left_half_circle_thick
+# controls_cap_right = ""   # nf-ple-right_half_circle_thick
 # # Tag prepended to the track title when the track is a Spotify recommendation
 # # (smart shuffle or "Similar to …" list). Set to "" to disable.
 # suggested_tag = "[N] "
@@ -215,6 +225,8 @@ align = "center"
 #statusbar_bg         = "default"
 #statusbar_controls   = "dark yellow"   # controls row fg; defaults to statusbar
 #statusbar_controls_bg = "default"      # controls row bg; defaults to statusbar_bg
+#statusbar_controls_active    = "white"      # enabled shuffle/repeat + press blink
+#statusbar_controls_button_bg = "light black" # pill bg for the "rounded" controls style
 #cmdline              = "default"
 #cmdline_bg           = "default"
 #search_match         = "light red"
@@ -230,9 +242,95 @@ align = "center"
 ###############################################################################
 # Keybindings
 ###############################################################################
-# Lyrics screen is on F9, the pane layout on F4 by default. Example of
-# rebinding pane focus movement:
+# Map a key to a command string (run several with ";"). Modifiers: Shift+,
+# Ctrl+, Alt+. Named keys: Enter, Space, Tab, Backspace, Esc, Left, Right, Up,
+# Down, Ins, Del, Home, End, PageUp, PageDown, F1-F12.
+#
+# Set `default_keybindings = false` (top of file) to start from an empty map.
+# Any binding you add under [keybindings] overrides the matching default below.
+#
+# The full list of built-in defaults follows (all commented out). Uncomment and
+# change the key to rebind, e.g. give "next" to "Ctrl+Right".
 
 #[keybindings]
-#"Shift+Right" = "focuspane right"
-#"Shift+Left" = "focuspane left"
+
+## Playback
+#"Shift+p"  = "playpause"
+#"Shift+s"  = "stop"
+#"<"        = "previous"
+#">"        = "next"
+#"f"        = "seek +1000"     # forward 1s
+#"b"        = "seek -1000"     # back 1s
+#"Shift+f"  = "seek +10000"    # forward 10s
+#"Shift+b"  = "seek -10000"    # back 10s
+#"+"        = "volup 1"
+#"]"        = "volup 5"
+#"-"        = "voldown 1"
+#"["        = "voldown 5"
+#"r"        = "repeat"         # cycle repeat mode
+#"z"        = "shuffle"        # toggle shuffle
+
+## Queue / track actions
+#"Enter"    = "play"
+#"Space"    = "queue ; move down"
+#"."        = "playnext ; move down"
+#"c"        = "clear"
+#"s"        = "save"
+#"Ctrl+s"   = "save queue"
+#"d"        = "delete"
+#"x"        = "share selected"     # requires share_clipboard feature
+#"Shift+x"  = "share current"      # requires share_clipboard feature
+#"Ctrl+v"   = "insert"             # insert URL from clipboard (share_clipboard)
+
+## Navigation / views
+#"o"        = "open selected"
+#"Shift+o"  = "open current"
+#"a"        = "goto album"
+#"Shift+a"  = "goto artist"
+#"m"        = "similar selected"   # recommendations for selected
+#"Shift+m"  = "similar current"    # recommendations for playing
+#"n"        = "jumpnext"           # next search match
+#"Shift+n"  = "jumpprevious"       # previous search match
+#"Backspace" = "back"
+#"?"        = "help"
+
+## Focus screens / panes
+#"F1"       = "focus queue"
+#"F2"       = "focus search"
+#"F3"       = "focus library"
+#"F4"       = "focus panes"
+#"F8"       = "focus cover"        # requires cover feature
+#"F9"       = "focus lyrics"
+#"Tab"      = "focuspane next"
+#"Alt+h"    = "focuspane left"
+#"Alt+j"    = "focuspane down"
+#"Alt+k"    = "focuspane up"
+#"Alt+l"    = "focuspane right"
+
+## Cursor movement (lists)
+#"Up"       = "move up"
+#"Down"     = "move down"
+#"Left"     = "move left"
+#"Right"    = "move right"
+#"k"        = "move up"
+#"j"        = "move down"
+#"h"        = "move left"
+#"l"        = "move right"
+#"Ctrl+p"   = "move up"
+#"Ctrl+n"   = "move down"
+#"Ctrl+a"   = "move left"
+#"Ctrl+e"   = "move right"
+#"PageUp"   = "move up 5"
+#"PageDown" = "move down 5"
+#"Home"     = "move top"
+#"End"      = "move bottom"
+#"g"        = "move top"
+#"Shift+g"  = "move bottom"
+#"p"        = "move playing"       # jump cursor to playing track
+#"Shift+Up"   = "shift up"         # reorder selected queue item up
+#"Shift+Down" = "shift down"       # reorder selected queue item down
+
+## App
+#"q"        = "quit"
+#"Shift+u"  = "update"             # refresh library from Spotify
+#"Ctrl+l"   = "redraw"
