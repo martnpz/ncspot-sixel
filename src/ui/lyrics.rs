@@ -278,7 +278,7 @@ impl LyricsView {
                     if t.artists.is_empty() {
                         t.title.clone()
                     } else {
-                        format!("{} - {}", t.artists.join(", "), t.title)
+                        format!("{} - {}", t.title, t.artists.join(", "))
                     }
                 }
                 Playable::Episode(e) => e.name.clone(),
