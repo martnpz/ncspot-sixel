@@ -187,7 +187,9 @@ pub struct IconsConfig {
     pub pane_back: Option<String>,
     pub pane_menu: Option<String>,
     pub menu_search: Option<String>,
+    pub menu_friends: Option<String>,
     pub menu_playlists: Option<String>,
+    pub menu_mixes: Option<String>,
     pub menu_albums: Option<String>,
     pub menu_artists: Option<String>,
     pub menu_recommendations: Option<String>,
@@ -226,7 +228,9 @@ pub enum IconKind {
     PaneMenu,
     // Drop-menu item icons — one per selectable entry.
     MenuSearch,
+    MenuFriends,
     MenuPlaylists,
+    MenuMixes,
     MenuAlbums,
     MenuArtists,
     MenuRecommendations,
@@ -261,7 +265,9 @@ impl IconKind {
             Self::PaneBack => ("\u{f0141} ", "< "),
             Self::PaneMenu => (" \u{f0140}", " ▾"),
             Self::MenuSearch => ("\u{f002} ", "/ "),
+            Self::MenuFriends => ("\u{f0c0} ", "& "),
             Self::MenuPlaylists => ("\u{f03a} ", "= "),
+            Self::MenuMixes => ("\u{f1bc} ", "≈ "),
             Self::MenuAlbums => ("\u{f001} ", "♫ "),
             Self::MenuArtists => ("\u{f007} ", "@ "),
             Self::MenuRecommendations => ("\u{f005} ", "* "),
@@ -583,7 +589,9 @@ impl Config {
                 IconKind::PaneBack => &icons.pane_back,
                 IconKind::PaneMenu => &icons.pane_menu,
                 IconKind::MenuSearch => &icons.menu_search,
+                IconKind::MenuFriends => &icons.menu_friends,
                 IconKind::MenuPlaylists => &icons.menu_playlists,
+                IconKind::MenuMixes => &icons.menu_mixes,
                 IconKind::MenuAlbums => &icons.menu_albums,
                 IconKind::MenuArtists => &icons.menu_artists,
                 IconKind::MenuRecommendations => &icons.menu_recommendations,
@@ -770,7 +778,7 @@ mod tests {
         assert_eq!(layout.columns[1].panes, vec!["info", "lyrics"]);
         let browser = layout.browser.expect("example should define [layout.browser]");
         assert_eq!(browser.default_section.as_deref(), Some("playlists"));
-        assert_eq!(browser.sections.map(|s| s.len()), Some(5));
+        assert_eq!(browser.sections.map(|s| s.len()), Some(7));
         let tracks = layout.tracks.expect("example should define [layout.tracks]");
         assert_eq!(tracks.row_height, Some(2));
         assert_eq!(layout.info.and_then(|i| i.genres), Some(2));

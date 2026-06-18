@@ -561,9 +561,20 @@ impl<I: ListItem + Clone> View for ListView<I> {
             };
 
             if row_within > 0 {
-                // Extra rows: fill text area with background, thumbnail fills the rest visually.
+                // Extra rows: fill text area with background (the thumbnail
+                // fills the visual left). Multi-row items may also place text
+                // here (e.g. a song/playlist line under a friend's name).
+                let second_left = item.display_second_left(&self.library);
+                let second_right = item.display_second_right(&self.library);
                 printer.with_color(style, |p| {
                     p.print_hline((text_x, 0), p.size.x.saturating_sub(text_x), " ");
+                    if !second_left.is_empty() {
+                        p.print((text_x, 0), &second_left);
+                    }
+                    if !second_right.is_empty() {
+                        let offset = HAlign::Right.get_offset(second_right.width(), p.size.x);
+                        p.print((offset, 0), &second_right);
+                    }
                 });
                 return;
             }
@@ -575,9 +586,20 @@ impl<I: ListItem + Clone> View for ListView<I> {
             let draw_center = !center.is_empty();
             let avail_w = printer.size.x.saturating_sub(text_x);
 
+            // Optional per-item name color (e.g. online friends), only when the
+            // row isn't selected or currently playing so those styles win.
+            let left_style = match item.left_color(&self.library) {
+                Some(fg) if self.selected != item_index && !currently_playing => {
+                    ColorStyle::new(fg, style.back)
+                }
+                _ => style,
+            };
+
             // draw left string
             printer.with_color(style, |printer| {
                 printer.print_hline((text_x, 0), avail_w, " ");
+            });
+            printer.with_color(left_style, |printer| {
                 printer.print((text_x, 0), &left);
             });
 

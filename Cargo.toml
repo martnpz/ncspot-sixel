@@ -78,6 +78,7 @@ icy_sixel = { version = "0.5.0", optional = true }
 librespot-connect = "0.8.0"
 ciborium = "0.2.2"
 ureq = { version = "2.12", default-features = false, features = ["native-tls", "json"] }
+http = "1"
 
 [target.'cfg(unix)'.dependencies]
 signal-hook = "0.4.4"

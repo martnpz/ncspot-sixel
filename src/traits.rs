@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use cursive::Cursive;
+use cursive::theme::ColorType;
 use cursive::view::{View, ViewWrapper};
 use cursive::views::NamedView;
 
@@ -19,6 +20,24 @@ pub trait ListItem: Sync + Send + 'static {
         "".to_string()
     }
     fn display_right(&self, library: &Library) -> String;
+
+    /// Left text drawn on the second row of a multi-row item (empty by default,
+    /// so single-row items are unaffected). Only shown when `row_height >= 2`.
+    fn display_second_left(&self, _library: &Library) -> String {
+        String::new()
+    }
+
+    /// Right-aligned text drawn on the second row of a multi-row item.
+    fn display_second_right(&self, _library: &Library) -> String {
+        String::new()
+    }
+
+    /// Optional foreground color override for the left (primary) text on the
+    /// first row, applied only when the item is neither selected nor playing.
+    /// `None` keeps the default style.
+    fn left_color(&self, _library: &Library) -> Option<ColorType> {
+        None
+    }
     fn play(&mut self, queue: &Queue);
     fn play_next(&mut self, queue: &Queue);
     fn queue(&mut self, queue: &Queue);

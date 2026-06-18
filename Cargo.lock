@@ -2377,6 +2377,7 @@ dependencies = [
  "cursive",
  "fern",
  "futures",
+ "http",
  "icy_sixel",
  "image",
  "ioctl-rs",

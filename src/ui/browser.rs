@@ -11,7 +11,7 @@ use cursive::view::Position;
 use cursive::views::OnEventView;
 use cursive::{Cursive, Printer, Vec2, View};
 use unicode_width::UnicodeWidthStr;
-use log::error;
+use log::{error, warn};
 
 use crate::command::{Command, TargetMode};
 use crate::commands::CommandResult;
@@ -199,7 +199,9 @@ impl<T: Copy + Send + Sync + 'static> View for PaneDropdownMenu<T> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BrowserSection {
     Search,
+    Friends,
     Playlists,
+    Mixes,
     Albums,
     Artists,
     Recommendations,
@@ -209,7 +211,9 @@ impl BrowserSection {
     fn label(self) -> &'static str {
         match self {
             Self::Search => "Search",
+            Self::Friends => "Friends",
             Self::Playlists => "Playlists",
+            Self::Mixes => "Mixes",
             Self::Albums => "Albums",
             Self::Artists => "Artists",
             Self::Recommendations => "Recommendations",
@@ -219,7 +223,9 @@ impl BrowserSection {
     fn parse(name: &str) -> Option<Self> {
         match name {
             "search" => Some(Self::Search),
+            "friends" => Some(Self::Friends),
             "playlists" => Some(Self::Playlists),
+            "mixes" => Some(Self::Mixes),
             "albums" => Some(Self::Albums),
             "artists" => Some(Self::Artists),
             "recommendations" => Some(Self::Recommendations),
@@ -228,9 +234,11 @@ impl BrowserSection {
     }
 }
 
-const DEFAULT_SECTIONS: [BrowserSection; 5] = [
+const DEFAULT_SECTIONS: [BrowserSection; 7] = [
     BrowserSection::Search,
+    BrowserSection::Friends,
     BrowserSection::Playlists,
+    BrowserSection::Mixes,
     BrowserSection::Albums,
     BrowserSection::Artists,
     BrowserSection::Recommendations,
@@ -250,6 +258,16 @@ pub struct BrowserView {
     playlists: ListView<crate::model::playlist::Playlist>,
     albums: ListView<crate::model::album::Album>,
     artists: ListView<crate::model::artist::Artist>,
+
+    /// Spotify-made mixes (Discover Weekly, Release Radar, Daily Mixes, …):
+    /// the subset of the user's playlists owned by the `spotify` account.
+    /// Refreshed from the live library each time the section is shown.
+    mixes_content: Arc<RwLock<Vec<crate::model::playlist::Playlist>>>,
+    mixes: ListView<crate::model::playlist::Playlist>,
+
+    /// Friend Activity (buddylist), refreshed each time the section is shown.
+    friends_content: Arc<RwLock<Vec<crate::friends::Friend>>>,
+    friends: ListView<crate::friends::Friend>,
 
     /// Recommendation tracks, fetched lazily on first visit.
     recommendations: Arc<RwLock<Vec<Playable>>>,
@@ -357,10 +375,32 @@ impl BrowserView {
         #[cfg(not(feature = "cover"))]
         let albums_list = ListView::new(albums_content.clone(), queue.clone(), library.clone());
 
+        // Mixes: filled lazily from the library on first/each visit.
+        let mixes_content: Arc<RwLock<Vec<crate::model::playlist::Playlist>>> =
+            Arc::new(RwLock::new(Vec::new()));
+        #[cfg(feature = "cover")]
+        let mixes_list = ListView::new(mixes_content.clone(), queue.clone(), library.clone())
+            .with_thumbnails(cfg.clone(), images.clone(), events.clone());
+        #[cfg(not(feature = "cover"))]
+        let mixes_list = ListView::new(mixes_content.clone(), queue.clone(), library.clone());
+
+        // Friends: fetched lazily from the buddylist on first visit.
+        let friends_content: Arc<RwLock<Vec<crate::friends::Friend>>> =
+            Arc::new(RwLock::new(Vec::new()));
+        #[cfg(feature = "cover")]
+        let friends_list = ListView::new(friends_content.clone(), queue.clone(), library.clone())
+            .with_thumbnails(cfg.clone(), images.clone(), events.clone());
+        #[cfg(not(feature = "cover"))]
+        let friends_list = ListView::new(friends_content.clone(), queue.clone(), library.clone());
+
         Self {
             playlists: playlists_list,
             albums: albums_list,
             artists: ListView::new(artists_content.clone(), queue.clone(), library.clone()),
+            mixes: mixes_list,
+            mixes_content,
+            friends: friends_list,
+            friends_content,
             playlists_content,
             albums_content,
             artists_content,
@@ -394,6 +434,18 @@ impl BrowserView {
             self.section_view_mut().on_leave();
             self.playlists.invalidate_slots();
             self.albums.invalidate_slots();
+            self.mixes.invalidate_slots();
+            self.friends.invalidate_slots();
+        }
+        // Refresh the Spotify-made mixes from the (possibly still-loading)
+        // library each time the section is shown so it stays current.
+        if section == BrowserSection::Mixes {
+            self.refresh_mixes();
+        }
+        // Friend Activity: refresh on each visit so the list reflects who is
+        // currently listening.
+        if section == BrowserSection::Friends {
+            self.load_friends();
         }
         self.section = section;
         if section == BrowserSection::Search {
@@ -404,6 +456,39 @@ impl BrowserView {
             self.load_recommendations();
         }
         self.events.trigger();
+    }
+
+    /// Recompute the Spotify-made mixes from the live library: every playlist
+    /// in the user's library owned by the `spotify` account (Discover Weekly,
+    /// Release Radar, Daily Mix, Daily Drive, …). Cheap; runs on the UI thread.
+    fn refresh_mixes(&self) {
+        const SPOTIFY_OWNER_ID: &str = "spotify";
+        let mixes: Vec<crate::model::playlist::Playlist> = self
+            .library
+            .playlists
+            .read()
+            .unwrap()
+            .iter()
+            .filter(|playlist| playlist.owner_id == SPOTIFY_OWNER_ID)
+            .cloned()
+            .collect();
+        *self.mixes_content.write().unwrap() = mixes;
+    }
+
+    /// Fetch the user's Friend Activity (buddylist) off-thread and populate
+    /// the friends list when it returns.
+    fn load_friends(&self) {
+        let Some(session) = self.queue.get_spotify().session() else {
+            warn!("can't load friend activity: no active session yet");
+            return;
+        };
+        let content = self.friends_content.clone();
+        let events = self.events.clone();
+        std::thread::spawn(move || {
+            let friends = crate::friends::fetch(&session);
+            *content.write().unwrap() = friends;
+            events.trigger();
+        });
     }
 
     /// Fetch recommendations seeded by random saved tracks, off-thread.
@@ -461,7 +546,9 @@ impl BrowserView {
     /// The list view of the active section.
     fn section_view_mut(&mut self) -> &mut dyn ViewExt {
         match self.section {
+            BrowserSection::Friends => &mut self.friends,
             BrowserSection::Playlists => &mut self.playlists,
+            BrowserSection::Mixes => &mut self.mixes,
             BrowserSection::Albums => &mut self.albums,
             BrowserSection::Artists => &mut self.artists,
             BrowserSection::Recommendations => &mut self.recommendations_view,
@@ -482,6 +569,13 @@ impl BrowserView {
                     playlists.get(self.playlists.get_selected_index()).cloned()
                 }?;
                 playlist.open(self.queue.clone(), self.library.clone())
+            }
+            BrowserSection::Mixes => {
+                let mix = {
+                    let mixes = self.mixes_content.read().unwrap();
+                    mixes.get(self.mixes.get_selected_index()).cloned()
+                }?;
+                mix.open(self.queue.clone(), self.library.clone())
             }
             BrowserSection::Albums => {
                 let album = {
@@ -534,7 +628,9 @@ impl BrowserView {
                 .map(|&sec| {
                     let icon = cfg.icon(match sec {
                         BrowserSection::Search => IconKind::MenuSearch,
+                        BrowserSection::Friends => IconKind::MenuFriends,
                         BrowserSection::Playlists => IconKind::MenuPlaylists,
+                        BrowserSection::Mixes => IconKind::MenuMixes,
                         BrowserSection::Albums => IconKind::MenuAlbums,
                         BrowserSection::Artists => IconKind::MenuArtists,
                         BrowserSection::Recommendations => IconKind::MenuRecommendations,
@@ -571,7 +667,9 @@ impl View for BrowserView {
         *self.last_content_w.write().unwrap() = printer.size.x;
 
         match self.section {
+            BrowserSection::Friends => self.friends.draw(printer),
             BrowserSection::Playlists => self.playlists.draw(printer),
+            BrowserSection::Mixes => self.mixes.draw(printer),
             BrowserSection::Albums => self.albums.draw(printer),
             BrowserSection::Artists => self.artists.draw(printer),
             BrowserSection::Recommendations => self.recommendations_view.draw(printer),
@@ -608,7 +706,9 @@ impl View for BrowserView {
 
     fn layout(&mut self, size: Vec2) {
         match self.section {
+            BrowserSection::Friends => self.friends.layout(size),
             BrowserSection::Playlists => self.playlists.layout(size),
+            BrowserSection::Mixes => self.mixes.layout(size),
             BrowserSection::Albums => self.albums.layout(size),
             BrowserSection::Artists => self.artists.layout(size),
             BrowserSection::Recommendations => self.recommendations_view.layout(size),
@@ -691,7 +791,11 @@ impl ViewExt for BrowserView {
         {
             self.playlists.invalidate_slots();
             self.albums.invalidate_slots();
+            self.mixes.invalidate_slots();
+            self.friends.invalidate_slots();
         }
+        // The mix we opened may have changed the library; refresh the subset.
+        self.refresh_mixes();
     }
 
     fn has_title_action(&self) -> bool {

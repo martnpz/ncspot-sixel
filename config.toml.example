@@ -85,8 +85,10 @@ panes = ["info", "lyrics"]
 heights = [30, 70]
 
 [layout.browser]
-# Dropdown sections, in order.
-sections = ["search", "playlists", "albums", "artists", "recommendations"]
+# Dropdown sections, in order. "mixes" lists the Spotify-made playlists in
+# your library (Discover Weekly, Release Radar, Daily Mix, …). "friends" shows
+# Spotify Friend Activity (who is listening to what).
+sections = ["search", "friends", "playlists", "mixes", "albums", "artists", "recommendations"]
 # Section shown at startup.
 default_section = "playlists"
 # "default" keeps Spotify's natural order; "name" sorts alphabetically
@@ -183,7 +185,9 @@ align = "center"
 #pane_menu = " "    # suffix shown in pane title when the view has a dropdown action
 # Drop-menu item icons (prefix before the label in every dropdown).
 #menu_search = "/ "
+#menu_friends = "& "
 #menu_playlists = "= "
+#menu_mixes = "≈ "
 #menu_albums = "♫ "
 #menu_artists = "@ "
 #menu_recommendations = "* "

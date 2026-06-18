@@ -317,7 +317,7 @@ from random saved tracks. Configure with:
 
 ```toml
 [layout.browser]
-sections = ["search", "playlists", "albums", "artists", "recommendations"]
+sections = ["search", "friends", "playlists", "mixes", "albums", "artists", "recommendations"]
 default_section = "playlists"
 sort = "default"   # or "name"
 ```

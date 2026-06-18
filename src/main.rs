@@ -19,6 +19,7 @@ mod commands;
 mod config;
 mod events;
 mod ext_traits;
+mod friends;
 mod library;
 mod lyrics;
 mod model;
