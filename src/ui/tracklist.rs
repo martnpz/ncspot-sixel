@@ -123,10 +123,10 @@ impl TrackListView {
         let saved = self.cfg.state().playlist_orders.get(id).cloned();
         if let Some(order) = saved {
             sort_playables(&mut self.content.write().unwrap(), &order.key, &order.direction);
-        } else if let Some(s) = self.tracks_config(|t| t.default_sort.clone()) {
-            if let Some((key, dir)) = parse_default_sort(&s) {
-                sort_playables(&mut self.content.write().unwrap(), &key, &dir);
-            }
+        } else if let Some(s) = self.tracks_config(|t| t.default_sort.clone())
+            && let Some((key, dir)) = parse_default_sort(&s)
+        {
+            sort_playables(&mut self.content.write().unwrap(), &key, &dir);
         }
         self
     }

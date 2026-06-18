@@ -74,9 +74,9 @@ impl Serializer for CborSerializer {
         &self,
         path: P,
     ) -> Result<T, String> {
-        let contents = std::fs::read(&path)
+        let file = std::fs::File::open(&path)
             .map_err(|e| format!("Unable to read {}: {}", path.as_ref().to_string_lossy(), e))?;
-        serde_cbor::from_slice(&contents).map_err(|e| {
+        ciborium::from_reader(std::io::BufReader::new(file)).map_err(|e| {
             format!(
                 "Unable to parse CBOR {}: {}",
                 path.as_ref().to_string_lossy(),
@@ -93,8 +93,8 @@ impl Serializer for CborSerializer {
                 e
             )
         })?;
-        serde_cbor::to_writer(file, &value)
-            .map(|_| value)
+        ciborium::into_writer(&value, std::io::BufWriter::new(file))
+            .map(|()| value)
             .map_err(|e| {
                 format!(
                     "Failed writing content to {}: {}",

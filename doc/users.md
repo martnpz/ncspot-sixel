@@ -40,7 +40,7 @@ here are the runtime dependencies:
 - `dbus`, `libncurses`, `libssl`
 - `libpulse` (or `portaudio`, if built using the PortAudio backend)
 - `libxcb` (if built with the `clipboard` feature)
-- `ueberzug` or a compatible implementation (e.g. `ueberzugpp`) (if built with the `cover` feature)
+- a sixel-capable terminal (if built with the `cover` feature)
 
 ### On BSD's
 Your distribution may have packaged `ncspot` in its package repository.
@@ -271,7 +271,7 @@ Possible configuration values are:
 | `[keybindings]`                 | Custom keybindings                                             | See [custom keybindings](#custom-keybindings)                                         |                     |
 | `ap_port`                       | Set ap-port for librespot (for restrictive firewalls)          | `80`, `443`, `4070`                                                                   |                     |
 | `pipewire_quantum`              | Requested PipeWire quantum in frames at 44.1 kHz<sup>[5]</sup> | Number (e.g. `256` ≈ 6 ms, `1024` ≈ 23 ms)                                            | `1024`              |
-| `cover_backend`<sup>[1]</sup>   | Cover art renderer                                             | `"sixel"`, `"ueberzug"`                                                               | auto-detected       |
+| `cover_backend`<sup>[1]</sup>   | Deprecated; covers always use sixel (value ignored)            | `"sixel"`                                                                             | sixel               |
 | `[layout]`                      | Pane layout of the `panes` screen                              | See [pane layout](#pane-layout)                                                       |                     |
 | `[icons]`                       | Override individual UI icons                                   | See [icons](#icons)                                                                   |                     |
 
@@ -530,10 +530,9 @@ body = "%artists"
 ### Cover Drawing
 When compiled with the `cover` feature, `ncspot` can draw the album art of the
 current track in a dedicated view (`:focus cover` or <kbd>F8</kbd> by default)
-using Überzug. The original project has been abandoned, therefore using a
-compatible implementation such as [Überzug++](https://github.com/jstkdng/ueberzugpp)
-is recommended. For more information on installation and terminal
-compatibility, consult that repository.
+using sixel graphics. This requires a sixel-capable terminal (e.g. foot,
+xterm with sixel enabled, WezTerm); support is detected automatically via the
+terminal's DA1 reply at startup.
 
 To allow scaling up the album art beyond its native resolution (640x640 for
 Spotify covers), use the config key `cover_max_scale`. This is especially useful

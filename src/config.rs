@@ -2,12 +2,11 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::path::PathBuf;
 use std::sync::{RwLock, RwLockReadGuard};
-use std::{fs, process};
+use std::{env, fs, process};
 
 use cursive::theme::Theme;
 use log::{debug, error};
 use ncspot::{CONFIGURATION_FILE_NAME, USER_STATE_FILE_NAME};
-use platform_dirs::AppDirs;
 
 use crate::command::{SortDirection, SortKey};
 use crate::model::playable::Playable;
@@ -96,7 +95,8 @@ pub struct ConfigValues {
     pub shuffle: Option<bool>,
     pub repeat: Option<queue::RepeatSetting>,
     pub cover_max_scale: Option<f32>,
-    /// Cover rendering backend: "sixel" or "ueberzug". Auto-detected when unset.
+    /// Deprecated: covers are always rendered with sixel. Kept so existing
+    /// configs that still set it continue to parse; the value is ignored.
     pub cover_backend: Option<String>,
     pub playback_state: Option<PlaybackState>,
     pub track_format: Option<TrackFormat>,
@@ -661,21 +661,40 @@ fn load(filename: &str) -> Result<ConfigValues, String> {
     TOML.load_or_generate_default(path, || Ok(ConfigValues::default()), false)
 }
 
-/// Returns the plaform app directories for ncspot if they could be determined,
+/// The per-user ncspot directories. Only the config and cache directories are
+/// needed; data/state dirs from the old cross-platform layout were unused.
+pub struct ProjectDirs {
+    pub config_dir: PathBuf,
+    pub cache_dir: PathBuf,
+}
+
+/// Resolve `$<env_var>/ncspot`, falling back to `$HOME/<fallback>/ncspot`
+/// (the XDG base-directory convention used on Linux).
+fn xdg_dir(env_var: &str, fallback: &str) -> Option<PathBuf> {
+    let base = env::var_os(env_var)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(fallback)))?;
+    Some(base.join("ncspot"))
+}
+
+/// Returns the ncspot config/cache directories if they could be determined,
 /// or an error otherwise.
-pub fn try_proj_dirs() -> Result<AppDirs, String> {
+pub fn try_proj_dirs() -> Result<ProjectDirs, String> {
     match *BASE_PATH
         .read()
         .map_err(|_| String::from("Poisoned RWLock"))?
     {
-        Some(ref basepath) => Ok(AppDirs {
-            cache_dir: basepath.join(".cache"),
+        Some(ref basepath) => Ok(ProjectDirs {
             config_dir: basepath.join(".config"),
-            data_dir: basepath.join(".local/share"),
-            state_dir: basepath.join(".local/state"),
+            cache_dir: basepath.join(".cache"),
         }),
-        None => AppDirs::new(Some("ncspot"), true)
-            .ok_or_else(|| String::from("Couldn't determine platform standard directories")),
+        None => Ok(ProjectDirs {
+            config_dir: xdg_dir("XDG_CONFIG_HOME", ".config")
+                .ok_or_else(|| String::from("Couldn't determine config directory"))?,
+            cache_dir: xdg_dir("XDG_CACHE_HOME", ".cache")
+                .ok_or_else(|| String::from("Couldn't determine cache directory"))?,
+        }),
     }
 }
 

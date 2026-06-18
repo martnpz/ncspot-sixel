@@ -18,8 +18,6 @@ use log::{debug, error, warn};
 
 use crate::events::EventManager;
 
-use super::CoverBackend;
-
 /// Spotify covers are at most 640x640.
 const MAX_COVER_PX: usize = 640;
 
@@ -139,13 +137,13 @@ impl SixelBackend {
     pub fn new(images: Arc<SixelImageCache>) -> Self {
         Self { images }
     }
-}
 
-impl CoverBackend for SixelBackend {
-    fn draw(
+    /// Draw the cover for `url` into the cell rectangle described by
+    /// `draw_offset`/`draw_size`. Returns whether the image was actually
+    /// drawn (false e.g. while an encode is still in flight).
+    pub fn draw(
         &self,
         url: &str,
-        _path: &Path,
         draw_offset: Vec2,
         draw_size: Vec2,
         font_size: Vec2,
@@ -179,7 +177,9 @@ impl CoverBackend for SixelBackend {
         true
     }
 
-    fn clear(&self, offset: Vec2, size: Vec2) {
+    /// Remove a previously drawn cover from the terminal by blanking the
+    /// `offset`/`size` cell region directly.
+    pub fn clear(&self, offset: Vec2, size: Vec2) {
         // Actively write blanks so the sixel pixels are erased even when
         // crossterm's diff optimisation would otherwise skip that area.
         clear_area(offset, size).ok();

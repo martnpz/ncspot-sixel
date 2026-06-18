@@ -1,6 +1,22 @@
 #![allow(dead_code)]
 
+use std::sync::{Arc, OnceLock};
 use std::{fmt::Write, path::PathBuf};
+
+/// Shared HTTP agent for cover/lyrics fetches. ureq is built with native-tls
+/// (the same TLS stack librespot uses) and no rustls, so the `ureq::get`
+/// shortcuts can't do HTTPS — we configure an agent with a native-tls
+/// connector once and reuse it.
+pub fn http_agent() -> &'static ureq::Agent {
+    static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
+    AGENT.get_or_init(|| {
+        let connector = ureq::native_tls::TlsConnector::new()
+            .expect("failed to initialize native-tls connector");
+        ureq::AgentBuilder::new()
+            .tls_connector(Arc::new(connector))
+            .build()
+    })
+}
 
 /// Returns a human readable String of a Duration
 ///
@@ -50,12 +66,15 @@ pub fn cache_path_for_url(url: String) -> std::path::PathBuf {
 }
 
 pub fn download(url: String, path: std::path::PathBuf) -> Result<(), std::io::Error> {
-    let mut resp = reqwest::blocking::get(url).map_err(std::io::Error::other)?;
+    let resp = http_agent()
+        .get(&url)
+        .call()
+        .map_err(std::io::Error::other)?;
 
     std::fs::create_dir_all(path.parent().unwrap())?;
     let mut file = std::fs::File::create(path)?;
 
-    std::io::copy(&mut resp, &mut file)?;
+    std::io::copy(&mut resp.into_reader(), &mut file)?;
     Ok(())
 }
 

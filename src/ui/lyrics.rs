@@ -173,7 +173,7 @@ impl LyricsView {
             let focus = sections.iter().position(|&sec| sec == current).unwrap_or(0);
             let menu_view = PaneDropdownMenu::new(items, |s, section| {
                 s.pop_layer();
-                s.call_on_name("lyrics_pane", move |view: &mut LyricsView| {
+                s.call_on_name("lyrics_pane", move |view: &mut Self| {
                     view.set_section(section);
                 });
             })

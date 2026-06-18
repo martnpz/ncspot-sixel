@@ -134,15 +134,13 @@ impl ContextMenu {
             let spotify = spotify.clone();
             let library = library.clone();
 
-            if let Some(track_id) = track.id.as_deref() {
-                if let Some(tracks) = &playlist.tracks {
-                    if let Some(index) = tracks
-                        .iter()
-                        .position(|t| t.id() == Some(track_id.to_string()))
-                    {
-                        playlist.delete_track(index, spotify, &library);
-                    }
-                }
+            if let Some(track_id) = track.id.as_deref()
+                && let Some(tracks) = &playlist.tracks
+                && let Some(index) = tracks
+                    .iter()
+                    .position(|t| t.id() == Some(track_id.to_string()))
+            {
+                playlist.delete_track(index, spotify, &library);
             }
             s.pop_layer();
         });

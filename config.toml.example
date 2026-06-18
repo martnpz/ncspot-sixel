@@ -38,10 +38,9 @@ pipewire_quantum = 1024
 # Cover art
 ###############################################################################
 
-# Cover renderer: "sixel" (in-process, no external tools) or "ueberzug"
-# (requires ueberzugpp). Auto-detected via the terminal's DA1 reply when
-# unset, so on a sixel-capable terminal you don't need to set this.
-#cover_backend = "sixel"
+# Covers are rendered in-process with sixel (requires a sixel-capable
+# terminal; support is detected via the terminal's DA1 reply at startup).
+# The legacy `cover_backend` key is accepted but ignored.
 
 # Maximum scaling ratio for cover art (useful on HiDPI displays).
 #cover_max_scale = 1.0

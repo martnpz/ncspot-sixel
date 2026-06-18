@@ -26,42 +26,33 @@ struct LrclibResponse {
 /// fuzzy search as fallback. Returns None when lrclib doesn't know the track.
 pub fn fetch(artists: &[String], title: &str, album: Option<&str>, duration_ms: u32) -> Option<Lyrics> {
     let artist = artists.first().map(String::as_str).unwrap_or_default();
-    let duration_s = duration_ms.div_ceil(1000);
+    let duration_s = duration_ms.div_ceil(1000).to_string();
 
-    let client = match reqwest::blocking::Client::builder()
-        .user_agent(USER_AGENT)
-        .build()
-    {
-        Ok(client) => client,
-        Err(e) => {
-            warn!("failed to create lrclib HTTP client: {e}");
-            return None;
-        }
-    };
-
-    let mut query = vec![
-        ("artist_name", artist.to_string()),
-        ("track_name", title.to_string()),
-        ("duration", duration_s.to_string()),
-    ];
+    let agent = crate::utils::http_agent();
+    let mut request = agent
+        .get(API_GET)
+        .set("User-Agent", USER_AGENT)
+        .query("artist_name", artist)
+        .query("track_name", title)
+        .query("duration", &duration_s);
     if let Some(album) = album {
-        query.push(("album_name", album.to_string()));
+        request = request.query("album_name", album);
     }
 
-    match client.get(API_GET).query(&query).send() {
-        Ok(response) if response.status().is_success() => {
-            if let Ok(found) = response.json::<LrclibResponse>() {
+    match request.call() {
+        Ok(response) => {
+            if let Ok(found) = response.into_json::<LrclibResponse>() {
                 debug!("lrclib match for {artist} - {title}");
                 return convert(found);
             }
             None
         }
-        Ok(response) if response.status().as_u16() == 404 => {
+        Err(ureq::Error::Status(404, _)) => {
             debug!("no exact lrclib match for {artist} - {title}, searching");
-            search(&client, artist, title)
+            search(agent, artist, title)
         }
-        Ok(response) => {
-            warn!("lrclib returned {} for {artist} - {title}", response.status());
+        Err(ureq::Error::Status(code, _)) => {
+            warn!("lrclib returned {code} for {artist} - {title}");
             None
         }
         Err(e) => {
@@ -71,17 +62,16 @@ pub fn fetch(artists: &[String], title: &str, album: Option<&str>, duration_ms: 
     }
 }
 
-fn search(client: &reqwest::blocking::Client, artist: &str, title: &str) -> Option<Lyrics> {
-    let response = client
+fn search(agent: &ureq::Agent, artist: &str, title: &str) -> Option<Lyrics> {
+    let response = agent
         .get(API_SEARCH)
-        .query(&[("artist_name", artist), ("track_name", title)])
-        .send()
+        .set("User-Agent", USER_AGENT)
+        .query("artist_name", artist)
+        .query("track_name", title)
+        .call()
         .map_err(|e| warn!("lrclib search failed: {e}"))
         .ok()?;
-    if !response.status().is_success() {
-        return None;
-    }
-    let results: Vec<LrclibResponse> = response.json().ok()?;
+    let results: Vec<LrclibResponse> = response.into_json().ok()?;
     info!("lrclib search for {artist} - {title}: {} results", results.len());
     results
         .into_iter()

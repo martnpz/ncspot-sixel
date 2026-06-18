@@ -518,11 +518,11 @@ impl Queue {
 
         let mut order: Vec<usize> = Vec::with_capacity(len);
         let mut random: Vec<usize> = (0..len).collect();
-        if let Some(current) = current {
-            if current < len {
-                order.push(current);
-                random.remove(current);
-            }
+        if let Some(current) = current
+            && current < len
+        {
+            order.push(current);
+            random.remove(current);
         }
 
         let mut rng = rand::rng();

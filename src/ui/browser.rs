@@ -98,13 +98,16 @@ impl<V: View> View for DropdownBorder<V> {
     }
 }
 
+/// Callback invoked when a [`PaneDropdownMenu`] row is submitted.
+type OnSubmit<T> = Arc<dyn Fn(&mut Cursive, T) + Send + Sync>;
+
 /// Generic drop-down list that renders every row with a concrete palette
 /// background (opaque over sixel graphics).
 /// Focused row uses `highlight()`, all others use `highlight_inactive()`.
 pub(crate) struct PaneDropdownMenu<T: Copy + Send + Sync + 'static> {
     items: Vec<(String, T)>,
     focus: usize,
-    on_submit: Arc<dyn Fn(&mut Cursive, T) + Send + Sync>,
+    on_submit: OnSubmit<T>,
 }
 
 impl<T: Copy + Send + Sync + 'static> PaneDropdownMenu<T> {

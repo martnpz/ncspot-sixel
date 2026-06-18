@@ -539,11 +539,10 @@ impl View for StatusBar {
             .as_ref()
             .and_then(|s| s.suggested_shimmer)
             .unwrap_or(true);
-        if is_suggested && shimmer_enabled {
-            if let Some(ref t) = title {
-                // Mirror the top_border layout to find the title's start column
-                // and the actually displayed (possibly truncated) text.
-                let full = format!(" {t} ");
+        if is_suggested && shimmer_enabled && let Some(ref t) = title {
+            // Mirror the top_border layout to find the title's start column
+            // and the actually displayed (possibly truncated) text.
+            let full = format!(" {t} ");
                 let (disp, tw) = if full.width() + 2 <= inner_w {
                     (t.clone(), full.width())
                 } else {
@@ -587,7 +586,6 @@ impl View for StatusBar {
                     printer.with_color(st, |p| p.print((x, 0), &s));
                     x += ch.width().unwrap_or(1);
                 }
-            }
         }
 
         // Row 1: top padding row (│ space │)

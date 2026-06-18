@@ -1,8 +1,5 @@
 pub mod sixel;
-pub mod ueberzug;
 
-use std::collections::HashSet;
-use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
@@ -10,7 +7,6 @@ use std::sync::{Arc, RwLock};
 use cursive::theme::{ColorStyle, ColorType, PaletteColor};
 use cursive::{Cursive, Printer, Vec2, View};
 use ioctl_rs::{TIOCGWINSZ, ioctl};
-use log::{error, info};
 
 use crate::command::{Command, GotoMode};
 use crate::commands::CommandResult;
@@ -57,30 +53,9 @@ pub fn cell_size_px(scale: f32) -> Vec2 {
     }
 }
 
-/// A renderer that can put a cover image onto the terminal.
-trait CoverBackend: Send + Sync {
-    /// Draw the image at `path` into the cell rectangle described by
-    /// `draw_offset`/`draw_size`. Returns whether the image was actually
-    /// drawn (false e.g. while an encode is still in flight).
-    fn draw(
-        &self,
-        url: &str,
-        path: &Path,
-        draw_offset: Vec2,
-        draw_size: Vec2,
-        font_size: Vec2,
-    ) -> bool;
-
-    /// Remove a previously drawn image from the terminal. `offset` and `size`
-    /// are the cell coordinates of the cover area so backends that need to
-    /// write directly to the terminal (e.g. sixel) can blank the right region.
-    fn clear(&self, offset: Vec2, size: Vec2);
-}
-
 pub struct CoverView {
     queue: Arc<Queue>,
     library: Arc<Library>,
-    loading: Arc<RwLock<HashSet<String>>>,
     last_size: RwLock<Vec2>,
     last_offset: RwLock<Vec2>,
     drawn_url: RwLock<Option<String>>,
@@ -88,7 +63,7 @@ pub struct CoverView {
     /// change and a second frame is pending to let the crossterm diff settle.
     draw_pending: RwLock<bool>,
     events: EventManager,
-    backend: Box<dyn CoverBackend>,
+    backend: sixel::SixelBackend,
     /// Maximum HiDPI scale correction from the config.
     scale: f32,
     /// When true, sixel emission is suppressed (e.g. while a modal overlay is
@@ -104,31 +79,11 @@ impl CoverView {
         images: Arc<sixel::SixelImageCache>,
         events: EventManager,
     ) -> Self {
-        let configured = config.values().cover_backend.clone();
-        let backend: Box<dyn CoverBackend> = match configured.as_deref() {
-            Some("sixel") => Box::new(sixel::SixelBackend::new(images)),
-            Some("ueberzug") => Box::new(ueberzug::UeberzugBackend::new()),
-            Some(other) => {
-                error!(r#"unknown cover_backend "{other}", falling back to ueberzug"#);
-                Box::new(ueberzug::UeberzugBackend::new())
-            }
-            None => {
-                if SIXEL_SUPPORT.get().copied().unwrap_or(false) {
-                    info!("using sixel cover backend");
-                    Box::new(sixel::SixelBackend::new(images))
-                } else {
-                    info!("terminal doesn't support sixel, using ueberzug cover backend");
-                    Box::new(ueberzug::UeberzugBackend::new())
-                }
-            }
-        };
-
         Self {
             queue,
             library,
-            backend,
+            backend: sixel::SixelBackend::new(images),
             events,
-            loading: Arc::new(RwLock::new(HashSet::new())),
             last_size: RwLock::new(Vec2::new(0, 0)),
             last_offset: RwLock::new(Vec2::zero()),
             drawn_url: RwLock::new(None),
@@ -182,14 +137,9 @@ impl CoverView {
             *self.draw_pending.write().unwrap() = false;
         }
 
-        let path = match self.cache_path(url.clone()) {
-            Some(p) => p,
-            None => return,
-        };
-
         let drawn = self
             .backend
-            .draw(&url, &path, draw_offset, draw_size, self.font_size());
+            .draw(&url, draw_offset, draw_size, self.font_size());
 
         if drawn {
             *self.last_size.write().unwrap() = draw_size;
@@ -225,32 +175,6 @@ impl CoverView {
         let offset = *self.last_offset.read().unwrap();
         let size = *self.last_size.read().unwrap();
         self.backend.clear(offset, size);
-    }
-
-    fn cache_path(&self, url: String) -> Option<PathBuf> {
-        let path = crate::utils::cache_path_for_url(url.clone());
-
-        let mut loading = self.loading.write().unwrap();
-        if loading.contains(&url) {
-            return None;
-        }
-
-        if path.exists() {
-            return Some(path);
-        }
-
-        loading.insert(url.clone());
-
-        let loading_thread = self.loading.clone();
-        std::thread::spawn(move || {
-            if let Err(e) = crate::utils::download(url.clone(), path.clone()) {
-                error!("Failed to download cover: {e}");
-            }
-            let mut loading = loading_thread.write().unwrap();
-            loading.remove(&url.clone());
-        });
-
-        None
     }
 }
 

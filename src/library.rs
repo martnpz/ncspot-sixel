@@ -352,10 +352,10 @@ impl Library {
                     // Tracks unchanged; patch cover_url on the cached entry in
                     // case it was saved before cover_url was introduced.
                     let mut store = self.playlists.write().unwrap();
-                    if let Some(local) = store.iter_mut().find(|p| p.id == remote.id) {
-                        if local.cover_url.is_none() {
-                            local.cover_url = remote.cover_url.clone();
-                        }
+                    if let Some(local) = store.iter_mut().find(|p| p.id == remote.id)
+                        && local.cover_url.is_none()
+                    {
+                        local.cover_url = remote.cover_url.clone();
                     }
                 }
             }
