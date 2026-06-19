@@ -6,9 +6,6 @@
   </picture>
   <h3>An ncurses Spotify client written in Rust using librespot</h3>
 
-[![Crates.io](https://img.shields.io/crates/v/ncspot.svg)](https://crates.io/crates/ncspot)
-[![Gitter](https://badges.gitter.im/ncspot/community.svg)](https://gitter.im/ncspot/community?utm_source=badge&utm_medium=badge&utm_campaign=pr-badge)
-
   <img alt="ncspot-sixel home" src="images/home.png">
 </div>
 
@@ -26,14 +23,13 @@ free accounts.
 - Support for a lot of platforms
 - Vim keybindings out of the box
 - IPC socket for remote control
-
-## Installation
-ncspot is available on macOS (Homebrew), Windows (Scoop, WinGet), Linux (native package, Flathub and
-Snapcraft) and the BSD's. Detailed installation instructions for each platform can be found
-[here](/doc/users.md).
+- Image rendering on sixel capable terminals
+- Synced lyrics pane
+- Customizable player status bar
+- Spotify recomendations
 
 ## Configuration
-A configuration file can be provided. The default location is `~/.config/ncspot`. Detailed
+A configuration file example is provided. The default location is `~/.config/ncspot/config.toml`. Detailed
 configuration information can be found [here](/doc/users.md#configuration).
 
 ## Building
