@@ -21,6 +21,11 @@ use crate::events::EventManager;
 /// Spotify covers are at most 640x640.
 const MAX_COVER_PX: usize = 640;
 
+/// Images at or below this side length (e.g. list thumbnails) are resized with
+/// fast bilinear instead of Lanczos3, since the quality difference is
+/// imperceptible at that size and they re-encode in bursts while scrolling.
+const THUMBNAIL_PX_THRESHOLD: usize = 128;
+
 /// Maximum number of encoded sixels kept in memory. Evicted FIFO; an evicted
 /// entry is re-read cheaply from the on-disk `.six` cache if needed again.
 /// Encoded covers/thumbnails range from a few KB (thumbnails) to ~tens of KB
@@ -279,11 +284,16 @@ fn encode(key: &CacheKey) -> Result<String, String> {
         .map_err(|e| e.to_string())?
         .decode()
         .map_err(|e| e.to_string())?;
-    let resized = image.resize_exact(
-        width as u32,
-        height as u32,
-        image::imageops::FilterType::Lanczos3,
-    );
+    // Lanczos3 is the slowest filter; reserve it for the large cover where the
+    // quality is visible. List thumbnails are tiny and re-encoded in bursts
+    // while scrolling, so use fast bilinear there — the difference is
+    // imperceptible at that size but the CPU saving is large.
+    let filter = if width.max(height) <= THUMBNAIL_PX_THRESHOLD {
+        image::imageops::FilterType::Triangle
+    } else {
+        image::imageops::FilterType::Lanczos3
+    };
+    let resized = image.resize_exact(width as u32, height as u32, filter);
     let rgba = resized.to_rgba8();
     let sixel = icy_sixel::SixelImage::try_from_rgba(rgba.into_raw(), width, height)
         .and_then(|image| image.encode())
