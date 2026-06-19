@@ -7,6 +7,77 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-06-19
+
+First release of the **ncspot-sixel** fork (branched from upstream `1.3.4`). A
+Linux-first reimagining focused on a Spotify-app-like TUI: sixel album art,
+synced lyrics, a redesigned player, and low-latency native audio. Summarizes
+all fork commits to date.
+
+### Added
+
+- **Sixel album covers**, rendered in-process (no external tools): a dedicated
+  cover pane plus cover thumbnails in the playlists/albums/tracks lists.
+  Bounded in-memory cache (256 entries) on top of an on-disk cache, and an
+  adaptive resize (fast bilinear for thumbnails, Lanczos3 for the full cover).
+- **Synced lyrics** from lrclib.net with a Spotify color-lyrics API fallback,
+  shown in a Spotify-app-like lyrics view.
+- **Native PipeWire audio sink** as the default backend, with a configurable
+  quantum (output latency) and bitrate.
+- **Full nerd-font support** via a customizable `[icons]` table.
+- **Three-section pane layout**: a browser panel with a dropdown section menu, a
+  track list with cover thumbnails, and a cover + synced-lyrics pane. Island /
+  rounded borders with configurable gap, padding, and per-pane height percents.
+- **Browser dropdown sections** — Search, Friends, Playlists, Mixes, Albums,
+  Artists, Recommendations — with configurable order, per-item icons and colors;
+  close with `q`, `Esc`, or a click outside.
+- **Friends section** — Spotify Friend Activity (buddylist): each friend shows
+  avatar, name + time since last online, and current song + playlist; online
+  friends' names are highlighted.
+- **Mixes section** — the Spotify-made playlists in your library (Discover
+  Weekly, Release Radar, Daily Mix, …).
+- **Recommendations** browsing and a **smart shuffle** that interleaves Spotify
+  recommendations into the queue.
+- **Redesigned player bar**: island layout with rounded borders, current song +
+  artist, and control buttons (play/pause, previous, next, shuffle / smart
+  shuffle, repeat / repeat-one). Click the island to toggle playback; scroll to
+  change volume. Configurable progress-bar style (thin / square / rounded) and
+  height.
+- **Animated song title** (scrolls right-to-left when long) and a **shimmer
+  effect** on suggested-track titles (only while playing).
+- **Terminal window title** reflecting the current track, customizable via
+  `title_format`.
+- **Queue dropdown menu** and **"Now Playing" context options**.
+- **Configurable track sorting**; the default queue order follows the playlist
+  sort.
+- **Last opened playlist/album** restored on startup.
+- **Search input customization** and a back button in pane titles.
+- Greatly expanded `config.toml.example` documenting every new option and the
+  full keybind list.
+
+### Changed
+
+- **Linux-only**: removed Windows/macOS compatibility code and the ueberzug
+  cover fallback (covers are sixel-only); replaced `platform-dirs` with direct
+  XDG resolution.
+- Selecting a playlist now **replaces the current queue**, and shuffle operates
+  over the selected playlist.
+- Replaced the unmaintained `serde_cbor` with `ciborium`, and unified all HTTPS
+  requests on `ureq` — dropping the bundled `reqwest`/`rustls` stack (~600 → 553
+  crates).
+- **Library sync** honors a 1-hour freshness TTL (instant cached startup; the
+  `update` command forces a refresh) and now caches podcasts/shows to disk.
+- **Lower idle CPU**: progress/animation redraws pause when not playing; the
+  sixel cache is bounded; the release profile enables `lto` and `strip = true`.
+
+### Fixed
+
+- Several **queue deadlocks** during song skipping, shuffle switching, and smart
+  shuffle.
+- Sixel **cover artifacts** left behind when switching panes, browser sections,
+  and screens (F1–F4).
+- The "recommended" tag not displaying correctly.
+
 ## [1.3.4]
 
 ### Changed

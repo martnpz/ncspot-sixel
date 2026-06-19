@@ -9,7 +9,7 @@
 [![Crates.io](https://img.shields.io/crates/v/ncspot.svg)](https://crates.io/crates/ncspot)
 [![Gitter](https://badges.gitter.im/ncspot/community.svg)](https://gitter.im/ncspot/community?utm_source=badge&utm_medium=badge&utm_campaign=pr-badge)
 
-  <img alt="ncspot search tab" src="images/screenshot.png">
+  <img alt="ncspot-sixel home" src="images/home.png">
 </div>
 
 ncspot is an ncurses Spotify client written in Rust using librespot. It is heavily inspired by
