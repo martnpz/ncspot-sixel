@@ -14,6 +14,8 @@ flip_status_indicators = false
 # "library", "search", "queue", "lyrics" or "cover".
 initial_screen = "panes"
 
+# Streaming bitrate in kbps. Valid: 96, 160, 320. 320 is the maximum the
+# Spotify/librespot API exposes (there is no lossless tier).
 bitrate = 320
 gapless = true
 
@@ -115,6 +117,10 @@ filter_row = true
 # Number of artist genres shown below the cover. Note: Spotify has
 # deprecated artist genres, so this may be empty for some artists.
 genres = 2
+
+# Terminal window title. Supports the same placeholders as statusbar_format
+# (e.g. %title, %artists). Default "ncspot - %title". Empty = leave untouched.
+#title_format = "ncspot - %title"
 
 ###############################################################################
 # Player bar (always island style: ╭── title ──╮ / │ bar │ / │ controls │ / ╰──╯)

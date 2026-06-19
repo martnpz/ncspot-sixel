@@ -5,7 +5,7 @@
 //! terminal. Writing from the cursive thread serializes our escape sequences
 //! with crossterm's own output, which prevents tearing.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::os::fd::AsRawFd;
@@ -20,6 +20,12 @@ use crate::events::EventManager;
 
 /// Spotify covers are at most 640x640.
 const MAX_COVER_PX: usize = 640;
+
+/// Maximum number of encoded sixels kept in memory. Evicted FIFO; an evicted
+/// entry is re-read cheaply from the on-disk `.six` cache if needed again.
+/// Encoded covers/thumbnails range from a few KB (thumbnails) to ~tens of KB
+/// (640px covers), so this bounds the cache to roughly a few MB.
+const MAX_CACHE_ENTRIES: usize = 256;
 
 /// Process-wide handle to the image cache for view-construction sites that
 /// dependency injection can't reach (e.g. [`crate::traits::ListItem::open`]).
@@ -60,11 +66,14 @@ impl SixelImageCache {
             .spawn({
                 let cache = cache.clone();
                 let pending = pending.clone();
+                // Insertion order for FIFO eviction; only the encoder thread
+                // touches it, so it lives here rather than on the struct.
+                let order: RwLock<VecDeque<CacheKey>> = RwLock::new(VecDeque::new());
                 move || {
                     while let Ok(key) = job_rx.recv() {
                         match encode(&key) {
                             Ok(sixel) => {
-                                cache.write().unwrap().insert(key.clone(), Arc::new(sixel));
+                                Self::store(&cache, &order, key.clone(), Arc::new(sixel));
                                 events.trigger();
                             }
                             Err(e) => error!("failed to sixel-encode {}: {e}", key.0),
@@ -80,6 +89,27 @@ impl SixelImageCache {
             cache,
             pending,
             blanks: RwLock::new(HashMap::new()),
+        }
+    }
+
+    /// Insert an encoded sixel into the cache, evicting the oldest entries
+    /// (FIFO) once the cache grows past [MAX_CACHE_ENTRIES].
+    fn store(
+        cache: &RwLock<HashMap<CacheKey, Arc<String>>>,
+        order: &RwLock<VecDeque<CacheKey>>,
+        key: CacheKey,
+        sixel: Arc<String>,
+    ) {
+        let mut cache = cache.write().unwrap();
+        let mut order = order.write().unwrap();
+        if cache.insert(key.clone(), sixel).is_none() {
+            // Only track newly added keys so re-encodes don't double-count.
+            order.push_back(key);
+        }
+        while order.len() > MAX_CACHE_ENTRIES {
+            if let Some(evicted) = order.pop_front() {
+                cache.remove(&evicted);
+            }
         }
     }
 

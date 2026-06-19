@@ -33,6 +33,13 @@ const CACHE_ARTISTS: &str = "artists.db";
 /// Cached playlists database filename.
 const CACHE_PLAYLISTS: &str = "playlists.db";
 
+/// Cached shows database filename.
+const CACHE_SHOWS: &str = "shows.db";
+
+/// Skip the API re-enumeration on launch if the library was synced within this
+/// many seconds. A manual `update` (or a library-modifying action) bypasses it.
+const LIBRARY_SYNC_TTL_SECS: i64 = 3600;
+
 /// The user library with all their saved tracks, albums, playlists... High level interface to the
 /// Spotify API used to manage items in the user library.
 #[derive(Clone)]
@@ -207,9 +214,41 @@ impl Library {
         }
     }
 
-    /// Update the local library and its cache on disk.
+    /// Update the local library and its cache on disk, honoring the freshness
+    /// TTL: when the cache was synced within [LIBRARY_SYNC_TTL_SECS] only the
+    /// on-disk cache is loaded and the API re-enumeration is skipped.
     pub fn update_library(&self) {
+        self.run_update(false);
+    }
+
+    /// Force a full re-sync from the API regardless of the freshness TTL
+    /// (manual `update` command, or after a library-modifying action).
+    pub fn force_update_library(&self) {
+        self.run_update(true);
+    }
+
+    /// True when the library hasn't been synced within [LIBRARY_SYNC_TTL_SECS].
+    fn sync_due(&self) -> bool {
+        match self.cfg.state().last_library_sync {
+            Some(last) => chrono::Utc::now().timestamp() - last >= LIBRARY_SYNC_TTL_SECS,
+            None => true,
+        }
+    }
+
+    /// Record the current time as the last successful library sync.
+    fn mark_synced(&self) {
+        self.cfg
+            .with_state_mut(|state| state.last_library_sync = Some(chrono::Utc::now().timestamp()));
+        self.cfg.save_state();
+    }
+
+    fn run_update(&self, force: bool) {
         *self.is_done.write().unwrap() = false;
+
+        let should_sync = force || self.sync_due();
+        if !should_sync {
+            debug!("library cache is fresh; loading from disk and skipping API re-sync");
+        }
 
         let library = self.clone();
         thread::spawn(move || {
@@ -220,11 +259,13 @@ impl Library {
                         &config::cache_path(CACHE_TRACKS),
                         library.tracks.write().unwrap().as_mut(),
                     );
-                    library.fetch_tracks();
-                    library.save_cache(
-                        &config::cache_path(CACHE_TRACKS),
-                        &library.tracks.read().unwrap(),
-                    );
+                    if should_sync {
+                        library.fetch_tracks();
+                        library.save_cache(
+                            &config::cache_path(CACHE_TRACKS),
+                            &library.tracks.read().unwrap(),
+                        );
+                    }
                 })
             };
 
@@ -235,11 +276,13 @@ impl Library {
                         &config::cache_path(CACHE_ALBUMS),
                         library.albums.write().unwrap().as_mut(),
                     );
-                    library.fetch_albums();
-                    library.save_cache(
-                        &config::cache_path(CACHE_ALBUMS),
-                        &library.albums.read().unwrap(),
-                    );
+                    if should_sync {
+                        library.fetch_albums();
+                        library.save_cache(
+                            &config::cache_path(CACHE_ALBUMS),
+                            &library.albums.read().unwrap(),
+                        );
+                    }
                 })
             };
 
@@ -250,7 +293,9 @@ impl Library {
                         &config::cache_path(CACHE_ARTISTS),
                         library.artists.write().unwrap().as_mut(),
                     );
-                    library.fetch_artists();
+                    if should_sync {
+                        library.fetch_artists();
+                    }
                 })
             };
 
@@ -261,37 +306,53 @@ impl Library {
                         &config::cache_path(CACHE_PLAYLISTS),
                         library.playlists.write().unwrap().as_mut(),
                     );
-                    library.fetch_playlists();
-                    library.save_cache(
-                        &config::cache_path(CACHE_PLAYLISTS),
-                        &library.playlists.read().unwrap(),
-                    );
+                    if should_sync {
+                        library.fetch_playlists();
+                        library.save_cache(
+                            &config::cache_path(CACHE_PLAYLISTS),
+                            &library.playlists.read().unwrap(),
+                        );
+                    }
                 })
             };
 
             let t_shows = {
                 let library = library.clone();
                 thread::spawn(move || {
-                    library.fetch_shows();
+                    library.load_cache(
+                        &config::cache_path(CACHE_SHOWS),
+                        library.shows.write().unwrap().as_mut(),
+                    );
+                    if should_sync {
+                        library.fetch_shows();
+                        library.save_cache(
+                            &config::cache_path(CACHE_SHOWS),
+                            &library.shows.read().unwrap(),
+                        );
+                    }
                 })
             };
 
             t_tracks.join().unwrap();
             t_artists.join().unwrap();
 
-            library.populate_artists();
-            library.save_cache(
-                &config::cache_path(CACHE_ARTISTS),
-                &library.artists.read().unwrap(),
-            );
+            if should_sync {
+                library.populate_artists();
+                library.save_cache(
+                    &config::cache_path(CACHE_ARTISTS),
+                    &library.artists.read().unwrap(),
+                );
+            }
 
             t_albums.join().unwrap();
             t_playlists.join().unwrap();
             t_shows.join().unwrap();
 
-            let mut is_done = library.is_done.write().unwrap();
-            *is_done = true;
+            if should_sync {
+                library.mark_synced();
+            }
 
+            *library.is_done.write().unwrap() = true;
             library.ev.send(crate::events::Event::LibraryLoaded);
         });
     }

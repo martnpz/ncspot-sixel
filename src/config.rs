@@ -102,6 +102,10 @@ pub struct ConfigValues {
     pub track_format: Option<TrackFormat>,
     pub notification_format: Option<NotificationFormat>,
     pub statusbar_format: Option<String>,
+    /// Format of the terminal window title. Supports the same placeholders as
+    /// `statusbar_format` (e.g. `%title`, `%artists`). Defaults to
+    /// `"ncspot - %title"`. Set to an empty string to leave the title untouched.
+    pub title_format: Option<String>,
     pub library_tabs: Option<Vec<LibraryTab>>,
     pub hide_display_names: Option<bool>,
     pub ap_port: Option<u16>,
@@ -467,6 +471,10 @@ pub struct UserState {
     pub queuestate: QueueState,
     pub playlist_orders: HashMap<String, SortingOrder>,
     pub cache_version: u16,
+    /// Unix epoch seconds of the last full library API sync, used to gate
+    /// re-syncing on launch behind a freshness TTL.
+    #[serde(default)]
+    pub last_library_sync: Option<i64>,
     pub playback_state: PlaybackState,
     /// Last opened playlist or album; re-fetched on startup.
     #[serde(default)]
@@ -483,6 +491,7 @@ impl Default for UserState {
             queuestate: QueueState::default(),
             playlist_orders: HashMap::new(),
             cache_version: 0,
+            last_library_sync: None,
             playback_state: PlaybackState::Default,
             last_opened: None,
         }

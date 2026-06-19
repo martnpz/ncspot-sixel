@@ -204,9 +204,11 @@ impl Worker {
                         break
                     },
                 },
-                // Update animated parts of the UI (e.g. statusbar during playback).
+                // Update animated parts of the UI (e.g. the progress bar). Only
+                // while actually playing — when paused or stopped the progress
+                // is static, so periodic redraws would just burn CPU.
                 _ = ui_refresh.tick() => {
-                    if !matches!(self.player_status, PlayerStatus::Stopped) {
+                    if matches!(self.player_status, PlayerStatus::Playing) {
                         self.events.trigger();
                     }
                 },

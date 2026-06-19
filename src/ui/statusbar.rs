@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::RwLock;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -53,6 +54,8 @@ pub struct StatusBar {
     shimmer_start: Instant,
     /// Last clicked play/prev/next button and when, for the press blink.
     blink: Option<(ControlButton, Instant)>,
+    /// Last terminal-title string written, to avoid redundant OSC writes.
+    last_title: RwLock<Option<String>>,
 }
 
 impl StatusBar {
@@ -65,12 +68,18 @@ impl StatusBar {
         {
             let queue = queue.clone();
             let library = library.clone();
+            let spotify = spotify.clone();
             thread::spawn(move || {
                 loop {
-                    let animate = queue
-                        .get_current()
-                        .map(|t| t.is_suggested())
-                        .unwrap_or(false);
+                    // Only animate while a suggested track is actually playing.
+                    // Paused/stopped → nothing changes, so idle-poll cheaply.
+                    let playing =
+                        matches!(spotify.get_current_status(), PlayerEvent::Playing(_));
+                    let animate = playing
+                        && queue
+                            .get_current()
+                            .map(|t| t.is_suggested())
+                            .unwrap_or(false);
                     if animate {
                         library.trigger_redraw();
                         thread::sleep(SHIMMER_FRAME);
@@ -88,6 +97,32 @@ impl StatusBar {
             last_size: Vec2::new(0, 0),
             shimmer_start: Instant::now(),
             blink: None,
+            last_title: RwLock::new(None),
+        }
+    }
+
+    /// Update the terminal window title to reflect the current track, honoring
+    /// the `title_format` config. Only writes when the title actually changes.
+    fn update_terminal_title(&self) {
+        let format = self
+            .library
+            .cfg
+            .values()
+            .title_format
+            .clone()
+            .unwrap_or_else(|| "ncspot - %title".to_string());
+        // Empty format disables title management entirely.
+        if format.is_empty() {
+            return;
+        }
+        let title = match self.queue.get_current() {
+            Some(ref t) => Playable::format(t, &format, &self.library),
+            None => "ncspot".to_string(),
+        };
+        let changed = self.last_title.read().unwrap().as_deref() != Some(title.as_str());
+        if changed {
+            crate::utils::set_terminal_title(&title);
+            *self.last_title.write().unwrap() = Some(title);
         }
     }
 
@@ -436,6 +471,8 @@ impl View for StatusBar {
         if printer.size.x == 0 {
             return;
         }
+
+        self.update_terminal_title();
 
         let style_bar = ColorStyle::new(
             ColorType::Color(*printer.theme.palette.custom("statusbar_progress").unwrap()),

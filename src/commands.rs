@@ -160,7 +160,7 @@ impl CommandManager {
                 Ok(None)
             }
             Command::UpdateLibrary => {
-                self.library.update_library();
+                self.library.force_update_library();
                 Ok(None)
             }
             Command::TogglePlay => {
@@ -236,7 +236,7 @@ impl CommandManager {
             }
             Command::NewPlaylist(name) => {
                 match self.spotify.api.create_playlist(name, None, None) {
-                    Ok(_) => self.library.update_library(),
+                    Ok(_) => self.library.force_update_library(),
                     Err(_) => error!("could not create playlist {name}"),
                 }
                 Ok(None)

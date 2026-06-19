@@ -59,6 +59,15 @@ pub fn ms_to_hms(duration: u32) -> String {
     formated_time
 }
 
+/// Set the terminal window title via an OSC escape written directly to the
+/// tty, so it doesn't interleave with cursive's screen output.
+pub fn set_terminal_title(title: &str) {
+    use std::io::Write;
+    if let Ok(mut tty) = std::fs::OpenOptions::new().write(true).open("/dev/tty") {
+        let _ = tty.write_all(format!("\x1b]0;{title}\x07").as_bytes());
+    }
+}
+
 pub fn cache_path_for_url(url: String) -> std::path::PathBuf {
     let mut path = crate::config::cache_path("covers");
     path.push(url.split('/').next_back().unwrap());
