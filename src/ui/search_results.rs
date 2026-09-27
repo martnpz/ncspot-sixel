@@ -1,7 +1,7 @@
 use crate::application::ASYNC_RUNTIME;
 use crate::command::Command;
 use crate::commands::CommandResult;
-use crate::events::EventManager;
+use crate::events::{Event, EventManager};
 use crate::library::Library;
 use crate::model::album::Album;
 use crate::model::artist::Artist;
@@ -18,9 +18,10 @@ use crate::ui::pagination::Pagination;
 use crate::ui::tabbedview::TabbedView;
 use cursive::Cursive;
 use cursive::view::ViewWrapper;
-use rspotify::model::SearchType;
 use rspotify::model::search::SearchResult;
-use std::sync::{Arc, RwLock};
+use rspotify::model::{Page, SearchType};
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex, RwLock};
 
 pub struct SearchResultsView {
     search_term: String,
@@ -41,8 +42,35 @@ pub struct SearchResultsView {
     events: EventManager,
 }
 
-type SearchHandler<I> =
-    Box<dyn Fn(&Spotify, &Arc<RwLock<Vec<I>>>, &str, usize, bool) -> u32 + Send + Sync>;
+type SearchHandler<I> = Box<
+    dyn Fn(&Spotify, &Arc<RwLock<Vec<I>>>, &str, usize, bool) -> Result<Option<usize>, ()>
+        + Send
+        + Sync,
+>;
+
+// Spotify's search totals and `next` links can underreport available results.
+// Probe one page at a time until it adds nothing, within the API's offset limit.
+pub(crate) fn apply_search_page<T: serde::de::DeserializeOwned, I: ListItem>(
+    page: Page<T>,
+    results: &Arc<RwLock<Vec<I>>>,
+    append: bool,
+    convert: impl Fn(&T) -> I,
+) -> Option<usize> {
+    let mut results = results.write().unwrap();
+    if !append {
+        results.clear();
+    }
+    let before = results.len();
+    let mut seen: HashSet<_> = results.iter().filter_map(ListItem::share_url).collect();
+    for item in &page.items {
+        let item = convert(item);
+        if item.share_url().is_none_or(|url| seen.insert(url)) {
+            results.push(item);
+        }
+    }
+    let next = page.offset.checked_add(page.limit)?;
+    (results.len() > before && page.limit > 0 && next <= 1000).then_some(next as usize)
+}
 
 impl SearchResultsView {
     pub fn new(
@@ -109,14 +137,14 @@ impl SearchResultsView {
         query: &str,
         _offset: usize,
         _append: bool,
-    ) -> u32 {
+    ) -> Result<Option<usize>, ()> {
         if let Ok(results) = spotify.api.track(query) {
             let t = vec![(&results).into()];
             let mut r = tracks.write().unwrap();
             *r = t;
-            return 1;
+            return Ok(None);
         }
-        0
+        Err(())
     }
 
     fn search_track(
@@ -125,23 +153,17 @@ impl SearchResultsView {
         query: &str,
         offset: usize,
         append: bool,
-    ) -> u32 {
+    ) -> Result<Option<usize>, ()> {
         if let Ok(SearchResult::Tracks(results)) =
             spotify
                 .api
-                .search(SearchType::Track, query, 50, offset as u32)
+                .search(SearchType::Track, query, 10, offset as u32)
         {
-            let mut t = results.items.iter().map(|ft| ft.into()).collect();
-            let mut r = tracks.write().unwrap();
-
-            if append {
-                r.append(&mut t);
-            } else {
-                *r = t;
-            }
-            return results.total;
+            return Ok(apply_search_page(results, tracks, append, |item| {
+                item.into()
+            }));
         }
-        0
+        Err(())
     }
 
     fn get_album(
@@ -150,14 +172,14 @@ impl SearchResultsView {
         query: &str,
         _offset: usize,
         _append: bool,
-    ) -> u32 {
+    ) -> Result<Option<usize>, ()> {
         if let Ok(results) = spotify.api.album(query) {
             let a = vec![(&results).into()];
             let mut r = albums.write().unwrap();
             *r = a;
-            return 1;
+            return Ok(None);
         }
-        0
+        Err(())
     }
 
     fn search_album(
@@ -166,23 +188,17 @@ impl SearchResultsView {
         query: &str,
         offset: usize,
         append: bool,
-    ) -> u32 {
+    ) -> Result<Option<usize>, ()> {
         if let Ok(SearchResult::Albums(results)) =
             spotify
                 .api
-                .search(SearchType::Album, query, 50, offset as u32)
+                .search(SearchType::Album, query, 10, offset as u32)
         {
-            let mut a = results.items.iter().map(|sa| sa.into()).collect();
-            let mut r = albums.write().unwrap();
-
-            if append {
-                r.append(&mut a);
-            } else {
-                *r = a;
-            }
-            return results.total;
+            return Ok(apply_search_page(results, albums, append, |item| {
+                item.into()
+            }));
         }
-        0
+        Err(())
     }
 
     fn get_artist(
@@ -191,14 +207,14 @@ impl SearchResultsView {
         query: &str,
         _offset: usize,
         _append: bool,
-    ) -> u32 {
+    ) -> Result<Option<usize>, ()> {
         if let Ok(results) = spotify.api.artist(query) {
             let a = vec![(&results).into()];
             let mut r = artists.write().unwrap();
             *r = a;
-            return 1;
+            return Ok(None);
         }
-        0
+        Err(())
     }
 
     fn search_artist(
@@ -207,23 +223,17 @@ impl SearchResultsView {
         query: &str,
         offset: usize,
         append: bool,
-    ) -> u32 {
+    ) -> Result<Option<usize>, ()> {
         if let Ok(SearchResult::Artists(results)) =
             spotify
                 .api
-                .search(SearchType::Artist, query, 50, offset as u32)
+                .search(SearchType::Artist, query, 10, offset as u32)
         {
-            let mut a = results.items.iter().map(|fa| fa.into()).collect();
-            let mut r = artists.write().unwrap();
-
-            if append {
-                r.append(&mut a);
-            } else {
-                *r = a;
-            }
-            return results.total;
+            return Ok(apply_search_page(results, artists, append, |item| {
+                item.into()
+            }));
         }
-        0
+        Err(())
     }
 
     fn get_playlist(
@@ -232,14 +242,14 @@ impl SearchResultsView {
         query: &str,
         _offset: usize,
         _append: bool,
-    ) -> u32 {
+    ) -> Result<Option<usize>, ()> {
         if let Ok(result) = spotify.api.playlist(query).as_ref() {
             let pls = vec![result.into()];
             let mut r = playlists.write().unwrap();
             *r = pls;
-            return 1;
+            return Ok(None);
         }
-        0
+        Err(())
     }
 
     fn search_playlist(
@@ -248,23 +258,17 @@ impl SearchResultsView {
         query: &str,
         offset: usize,
         append: bool,
-    ) -> u32 {
+    ) -> Result<Option<usize>, ()> {
         if let Ok(SearchResult::Playlists(results)) =
             spotify
                 .api
-                .search(SearchType::Playlist, query, 50, offset as u32)
+                .search(SearchType::Playlist, query, 10, offset as u32)
         {
-            let mut pls = results.items.iter().map(|sp| sp.into()).collect();
-            let mut r = playlists.write().unwrap();
-
-            if append {
-                r.append(&mut pls);
-            } else {
-                *r = pls;
-            }
-            return results.total;
+            return Ok(apply_search_page(results, playlists, append, |item| {
+                item.into()
+            }));
         }
-        0
+        Err(())
     }
 
     fn get_show(
@@ -273,14 +277,14 @@ impl SearchResultsView {
         query: &str,
         _offset: usize,
         _append: bool,
-    ) -> u32 {
+    ) -> Result<Option<usize>, ()> {
         if let Ok(result) = spotify.api.show(query).as_ref() {
             let pls = vec![result.into()];
             let mut r = shows.write().unwrap();
             *r = pls;
-            return 1;
+            return Ok(None);
         }
-        0
+        Err(())
     }
 
     fn search_show(
@@ -289,23 +293,17 @@ impl SearchResultsView {
         query: &str,
         offset: usize,
         append: bool,
-    ) -> u32 {
+    ) -> Result<Option<usize>, ()> {
         if let Ok(SearchResult::Shows(results)) =
             spotify
                 .api
-                .search(SearchType::Show, query, 50, offset as u32)
+                .search(SearchType::Show, query, 10, offset as u32)
         {
-            let mut pls = results.items.iter().map(|sp| sp.into()).collect();
-            let mut r = shows.write().unwrap();
-
-            if append {
-                r.append(&mut pls);
-            } else {
-                *r = pls;
-            }
-            return results.total;
+            return Ok(apply_search_page(results, shows, append, |item| {
+                item.into()
+            }));
         }
-        0
+        Err(())
     }
 
     fn get_episode(
@@ -314,14 +312,14 @@ impl SearchResultsView {
         query: &str,
         _offset: usize,
         _append: bool,
-    ) -> u32 {
+    ) -> Result<Option<usize>, ()> {
         if let Ok(result) = spotify.api.episode(query).as_ref() {
             let e = vec![result.into()];
             let mut r = episodes.write().unwrap();
             *r = e;
-            return 1;
+            return Ok(None);
         }
-        0
+        Err(())
     }
 
     fn search_episode(
@@ -330,23 +328,17 @@ impl SearchResultsView {
         query: &str,
         offset: usize,
         append: bool,
-    ) -> u32 {
+    ) -> Result<Option<usize>, ()> {
         if let Ok(SearchResult::Episodes(results)) =
             spotify
                 .api
-                .search(SearchType::Episode, query, 50, offset as u32)
+                .search(SearchType::Episode, query, 10, offset as u32)
         {
-            let mut e = results.items.iter().map(|se| se.into()).collect();
-            let mut r = episodes.write().unwrap();
-
-            if append {
-                r.append(&mut e);
-            } else {
-                *r = e;
-            }
-            return results.total;
+            return Ok(apply_search_page(results, episodes, append, |item| {
+                item.into()
+            }));
         }
-        0
+        Err(())
     }
 
     fn perform_search<I: ListItem + Clone>(
@@ -363,24 +355,43 @@ impl SearchResultsView {
         let paginator = paginator.cloned();
 
         std::thread::spawn(move || {
-            let total_items = handler(&spotify, &results, &query, 0, false) as usize;
-
-            // register paginator if the API has more than one page of results
-            if let Some(mut paginator) = paginator {
-                let loaded_items = results.read().unwrap().len();
-                if total_items > loaded_items {
-                    let ev = ev.clone();
-
-                    // paginator callback
-                    let cb = move |items: Arc<RwLock<Vec<I>>>| {
-                        let offset = items.read().unwrap().len();
-                        handler(&spotify, &results, &query, offset, true);
-                        ev.trigger();
-                    };
-                    paginator.set(loaded_items, total_items, Box::new(cb));
-                } else {
-                    paginator.clear()
+            let next_offset = match handler(&spotify, &results, &query, 0, false) {
+                Ok(next) => next,
+                Err(()) => {
+                    ev.send(Event::Message(Err(
+                        "Search failed; please retry the query.".to_owned(),
+                    )));
+                    ev.trigger();
+                    return;
                 }
+            };
+
+            if let Some(paginator) = paginator {
+                let loaded = results.read().unwrap().len();
+                let has_more = next_offset.is_some();
+                let next_offset = Mutex::new(next_offset);
+                let update_progress = paginator.search_progress_callback();
+                let callback_events = ev.clone();
+                let cb = move |items: Arc<RwLock<Vec<I>>>| {
+                    let mut next = next_offset.lock().unwrap();
+                    let Some(offset) = *next else { return };
+                    match handler(&spotify, &results, &query, offset, true) {
+                        Ok(new_offset) => {
+                            *next = new_offset;
+                            update_progress(items.read().unwrap().len(), next.is_some());
+                        }
+                        Err(()) => {
+                            // Keep both existing results and the failed offset for a later retry.
+                            callback_events.send(Event::Message(Err(
+                                "Could not load more search results; scroll down to retry."
+                                    .to_owned(),
+                            )));
+                        }
+                    }
+                    callback_events.trigger();
+                };
+                paginator.set(loaded, loaded, Box::new(cb));
+                paginator.search_progress_callback()(loaded, has_more);
             }
             ev.trigger();
         });
@@ -565,5 +576,84 @@ impl ViewExt for SearchResultsView {
     }
     fn on_command(&mut self, s: &mut Cursive, cmd: &Command) -> Result<CommandResult, String> {
         self.tabs.on_command(s, cmd)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::category::Category;
+
+    fn page(offset: u32, ids: std::ops::Range<u32>) -> Page<Category> {
+        Page {
+            href: String::new(),
+            limit: 10,
+            next: None,
+            offset,
+            previous: None,
+            total: 9,
+            items: ids
+                .map(|id| Category {
+                    id: id.to_string(),
+                    name: id.to_string(),
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn search_continues_past_underreported_total_and_missing_next() {
+        let results = Arc::new(RwLock::new(Vec::new()));
+        assert_eq!(
+            apply_search_page(page(0, 0..9), &results, false, Clone::clone),
+            Some(10)
+        );
+        assert_eq!(results.read().unwrap().len(), 9);
+        assert_eq!(
+            apply_search_page(page(10, 10..20), &results, true, Clone::clone),
+            Some(20)
+        );
+        assert_eq!(
+            apply_search_page(page(20, 20..30), &results, true, Clone::clone),
+            Some(30)
+        );
+        assert_eq!(results.read().unwrap().len(), 29);
+        assert_eq!(
+            apply_search_page(page(30, 0..0), &results, true, Clone::clone),
+            None
+        );
+        assert_eq!(results.read().unwrap().len(), 29);
+    }
+
+    #[test]
+    fn overlapping_pages_are_deduplicated_and_repeated_pages_stop() {
+        let results = Arc::new(RwLock::new(Vec::new()));
+        apply_search_page(page(0, 0..10), &results, false, Clone::clone);
+        assert_eq!(
+            apply_search_page(page(10, 5..15), &results, true, Clone::clone),
+            Some(20)
+        );
+        assert_eq!(results.read().unwrap().len(), 15);
+        assert_eq!(
+            apply_search_page(page(20, 5..15), &results, true, Clone::clone),
+            None
+        );
+        assert_eq!(results.read().unwrap().len(), 15);
+    }
+
+    #[test]
+    fn search_respects_offset_ceiling_and_replaces_old_query() {
+        let results = Arc::new(RwLock::new(Vec::new()));
+        assert_eq!(
+            apply_search_page(page(990, 0..10), &results, false, Clone::clone),
+            Some(1000)
+        );
+        assert_eq!(
+            apply_search_page(page(1000, 10..20), &results, true, Clone::clone),
+            None
+        );
+        apply_search_page(page(0, 30..33), &results, false, Clone::clone);
+        assert_eq!(results.read().unwrap().len(), 3);
+        assert_eq!(results.read().unwrap()[0].id, "30");
     }
 }

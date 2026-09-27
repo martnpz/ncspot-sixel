@@ -575,7 +575,8 @@ changed playlists refresh on the normal library schedule or with `:update`.
 Failed reads preserve cached contents. This workaround is read-only and uses
 unofficial Spotify services, which can change. Ordinary friends' playlists
 remain outside this fallback. Browse categories are omitted and search uses ten
-results per page.
+results per request. Scroll down to load more search results; pagination does
+not rely on Spotify's sometimes inaccurate result totals.
 
 Suggestions use Radio/Autoplay through the authenticated playback session, not
 the restricted Web API Recommendations endpoint. Smart shuffle keeps the current

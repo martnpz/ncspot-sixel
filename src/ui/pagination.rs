@@ -116,6 +116,7 @@ pub struct Pagination<I: ListItem> {
     max_content: Arc<RwLock<Option<usize>>>,
     callback: Arc<RwLock<Option<Paginator<I>>>>,
     busy: Arc<RwLock<bool>>,
+    total_known: Arc<RwLock<bool>>,
 }
 
 impl<I: ListItem> Default for Pagination<I> {
@@ -125,6 +126,7 @@ impl<I: ListItem> Default for Pagination<I> {
             max_content: Arc::new(RwLock::new(None)),
             callback: Arc::new(RwLock::new(None)),
             busy: Arc::new(RwLock::new(false)),
+            total_known: Arc::new(RwLock::new(true)),
         }
     }
 }
@@ -135,9 +137,27 @@ impl<I: ListItem + Clone> Pagination<I> {
         *self.callback.write().unwrap() = None;
     }
     pub fn set(&self, loaded_content: usize, max_content: usize, callback: Paginator<I>) {
+        *self.total_known.write().unwrap() = true;
         *self.loaded_content.write().unwrap() = loaded_content;
         *self.max_content.write().unwrap() = Some(max_content);
         *self.callback.write().unwrap() = Some(callback);
+    }
+
+    /// Update search progress without retaining this paginator's own callback.
+    /// Search can probe another page, but does not have a reliable result total.
+    pub fn search_progress_callback(&self) -> Box<dyn Fn(usize, bool) + Send + Sync> {
+        let total_known = self.total_known.clone();
+        let loaded_content = self.loaded_content.clone();
+        let max_content = self.max_content.clone();
+        Box::new(move |loaded, has_more| {
+            *total_known.write().unwrap() = false;
+            *loaded_content.write().unwrap() = loaded;
+            *max_content.write().unwrap() = Some(loaded + usize::from(has_more));
+        })
+    }
+
+    pub fn total_known(&self) -> bool {
+        *self.total_known.read().unwrap()
     }
 
     pub fn loaded_content(&self) -> usize {
@@ -163,9 +183,9 @@ impl<I: ListItem + Clone> Pagination<I> {
                     debug!("calling paginator!");
                     cb(content.clone());
                     *pagination.loaded_content.write().unwrap() = content.read().unwrap().len();
-                    *pagination.busy.write().unwrap() = false;
-                    library.trigger_redraw();
                 }
+                *pagination.busy.write().unwrap() = false;
+                library.trigger_redraw();
             });
         }
     }

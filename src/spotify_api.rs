@@ -861,6 +861,29 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires cached Web API authorization and network access"]
+    fn live_search_pagination() {
+        let cfg = Arc::new(crate::config::Config::new(None));
+        let token = crate::authentication::get_web_token(&cfg, false, false).unwrap();
+        let api = WebApi::new(cfg);
+        *api.api.token.lock().unwrap() = Some(token);
+        let results: Arc<RwLock<Vec<Track>>> = Arc::new(RwLock::new(Vec::new()));
+        let mut offset = 0;
+        for _ in 0..3 {
+            let SearchResult::Tracks(page) = api.search(SearchType::Track, "Radiohead", 10, offset).unwrap() else {
+                panic!("expected tracks")
+            };
+            println!("Search offset={} limit={} items={} total={} next={}", page.offset, page.limit, page.items.len(), page.total, page.next.is_some());
+            assert_eq!(page.offset, offset);
+            offset = crate::ui::search_results::apply_search_page(page, &results, offset > 0, |item| item.into())
+                .expect("more search results") as u32;
+        }
+        let loaded = results.read().unwrap().len();
+        assert!(loaded > 20, "three pages should contain more than twenty distinct results");
+        println!("Search view accumulated {loaded} distinct tracks across three pages");
+    }
+
+    #[test]
     #[ignore = "requires personal Web API browser authorization and network access"]
     fn live_personal_library_access() {
         let cfg = Arc::new(crate::config::Config::new(None));

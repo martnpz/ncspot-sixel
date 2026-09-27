@@ -517,7 +517,11 @@ impl<I: ListItem + Clone> View for ListView<I> {
             if i >= item_rows {
                 if self.can_paginate() {
                     let max = self.pagination.max_content().unwrap();
-                    let buf = format!("{} more items, scroll to load", max - item_count);
+                    let buf = if self.pagination.total_known() {
+                        format!("{} more items, scroll to load", max.saturating_sub(item_count))
+                    } else {
+                        "More results, scroll to load".to_owned()
+                    };
                     printer.with_color(ColorStyle::secondary(), |p| p.print((0, 0), &buf));
                 }
                 return;
