@@ -306,15 +306,13 @@ impl ListItem for Album {
 
         let spotify = queue.get_spotify();
         let recommendations: Option<Vec<Track>> = spotify
-            .api
             .recommendations(
                 artist_id.as_ref().map(|aid| vec![aid.as_str()]),
                 None,
                 Some(track_ids),
             )
             .ok()
-            .map(|r| r.tracks)
-            .map(|tracks| tracks.iter().map(Track::from).collect());
+            .map(|r| r.tracks);
         recommendations.map(|tracks| {
             ListView::new(
                 Arc::new(RwLock::new(tracks)),

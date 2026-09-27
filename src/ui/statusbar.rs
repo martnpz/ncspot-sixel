@@ -14,7 +14,6 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use crate::config::IconKind;
 use crate::library::Library;
 use crate::model::playable::Playable;
-use crate::model::track::Track;
 use crate::queue::{Queue, RepeatSetting};
 use crate::spotify::{PlayerEvent, Spotify};
 use crate::utils::ms_to_hms;
@@ -415,44 +414,7 @@ impl StatusBar {
         log::info!("SS: remove_suggested done");
 
         if new_smart {
-            // Smart shuffle: intersperse fresh Spotify recommendations into the
-            // queue. Runs off-thread (network + locked queue writes).
-            let queue = self.queue.clone();
-            let spotify = self.spotify.clone();
-            let library = self.library.clone();
-            thread::spawn(move || {
-                log::info!("SS: bg thread seeding");
-                let seed_ids = queue.seed_track_ids(5);
-                log::info!("SS: seeds={}", seed_ids.len());
-                if seed_ids.is_empty() {
-                    return;
-                }
-                let seed_refs: Vec<&str> = seed_ids.iter().map(|s| s.as_str()).collect();
-                log::info!("SS: calling recommendations API");
-                let result = spotify.api.recommendations(None, None, Some(seed_refs));
-                log::info!("SS: recommendations returned (ok={})", result.is_ok());
-                if let Ok(recs) = result {
-                    let tracks: Vec<Playable> = recs
-                        .tracks
-                        .iter()
-                        .map(|t| {
-                            let mut track = Track::from(t);
-                            track.is_suggested = true;
-                            Playable::Track(track)
-                        })
-                        .collect();
-                    // Single locked append minimizes contention with the playback thread.
-                    log::info!("SS: append_all ({} tracks)", tracks.len());
-                    queue.append_all(tracks);
-                    log::info!("SS: append_all done, reshuffling");
-                    // Reshuffle so recommendations are interspersed (Spotify-style),
-                    // not stuck at the end of the play order.
-                    queue.reshuffle();
-                    log::info!("SS: reshuffle done, triggering redraw");
-                    library.trigger_redraw();
-                    log::info!("SS: bg thread done");
-                }
-            });
+            self.queue.start_smart_shuffle();
         }
     }
 

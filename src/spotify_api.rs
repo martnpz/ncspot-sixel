@@ -1,16 +1,15 @@
-use std::sync::{Arc, RwLock};
-use std::thread;
-use std::time::Duration;
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::{Duration, Instant};
 
 use crate::application::ASYNC_RUNTIME;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
-use log::{debug, error, info};
+use log::{debug, error, info, warn};
 use rspotify::http::HttpError;
 use rspotify::model::{
     AlbumId, AlbumType, ArtistId, CursorBasedPage, EpisodeId, FullAlbum, FullArtist, FullEpisode,
     FullPlaylist, FullShow, FullTrack, ItemPositions, LibraryId, Market, Page, PlayableId,
-    PlaylistId, PlaylistResult, PrivateUser, Recommendations, SavedAlbum, SavedTrack, SearchResult,
-    SearchType, Show, ShowId, SimplifiedTrack, TrackId, UserId,
+    PlaylistId, PlaylistResult, PrivateUser, SavedAlbum, SavedTrack, SearchResult, SearchType,
+    Show, ShowId, SimplifiedTrack, TrackId, UserId,
 };
 use rspotify::{AuthCodeSpotify, ClientError, ClientResult, Config, prelude::*};
 use tokio::sync::mpsc;
@@ -37,16 +36,18 @@ pub struct WebApi {
     worker_channel: Arc<RwLock<Option<mpsc::UnboundedSender<WorkerCommand>>>>,
     /// Time at which the token expires.
     token_expiration: Arc<RwLock<DateTime<Utc>>>,
+    cfg: Arc<crate::config::Config>,
+    request_gate: Arc<Mutex<Option<Instant>>>,
 }
 
-impl Default for WebApi {
-    fn default() -> Self {
+impl WebApi {
+    pub fn new(cfg: Arc<crate::config::Config>) -> Self {
         let config = Config {
             token_refreshing: false,
             ..Default::default()
         };
         let api = AuthCodeSpotify::with_config(
-            rspotify::Credentials::new(crate::authentication::NCSPOT_CLIENT_ID, ""),
+            rspotify::Credentials::new(&crate::authentication::web_api_client_id(&cfg), ""),
             rspotify::OAuth::default(),
             config,
         );
@@ -55,13 +56,14 @@ impl Default for WebApi {
             user: None,
             worker_channel: Arc::new(RwLock::new(None)),
             token_expiration: Arc::new(RwLock::new(Utc::now())),
+            cfg,
+            request_gate: Arc::new(Mutex::new(None)),
         }
     }
-}
 
-impl WebApi {
-    pub fn new() -> Self {
-        Self::default()
+    #[cfg(test)]
+    pub fn defer_requests_for_test(&self) {
+        *self.request_gate.lock().unwrap() = Some(Instant::now() + Duration::from_secs(3600));
     }
 
     /// Set the username for use with the API.
@@ -93,10 +95,11 @@ impl WebApi {
             info!("Token will expire in {delta}, renewing");
         }
 
+        let cfg = self.cfg.clone();
         let api_token = self.api.token.clone();
         let api_token_expiration = self.token_expiration.clone();
         Some(ASYNC_RUNTIME.get().unwrap().spawn_blocking(move || {
-            match crate::authentication::get_rspotify_token() {
+            match crate::authentication::get_web_token(&cfg, false, false) {
                 Ok(token) => {
                     let expires_at = token
                         .expires_at
@@ -111,44 +114,83 @@ impl WebApi {
         }))
     }
 
-    /// Execute `api_call` and retry once if a rate limit occurs.
+    /// Remaining shared cooldown. Only background library jobs wait for it.
+    pub fn retry_after(&self) -> Option<Duration> {
+        self.request_gate
+            .lock()
+            .unwrap()
+            .and_then(|until| until.checked_duration_since(Instant::now()))
+    }
+
+    /// Serialize requests and respect every 429, including retries. Never sleep
+    /// through a server cooldown on the UI thread or retry a mutation blindly.
     fn api_with_retry<F, R>(&self, api_call: F) -> Option<R>
     where
         F: Fn(&AuthCodeSpotify) -> ClientResult<R>,
     {
-        let result = { api_call(&self.api) };
-        match result {
-            Ok(v) => Some(v),
-            Err(ClientError::Http(error)) => {
-                debug!("http error: {error:?}");
-                match error.as_ref() {
-                    HttpError::StatusCode(response) => match response.status() {
-                        429 => {
-                            let waiting_duration = response
-                                .header("Retry-After")
-                                .and_then(|v| v.parse::<u64>().ok());
-                            debug!("rate limit hit. waiting {waiting_duration:?} seconds");
-                            thread::sleep(Duration::from_secs(waiting_duration.unwrap_or(0)));
-                            api_call(&self.api).ok()
+        let mut gate = self.request_gate.lock().unwrap();
+        if gate.is_some_and(|until| until > Instant::now()) {
+            return None;
+        }
+        for attempt in 0..2 {
+            match api_call(&self.api) {
+                Ok(value) => {
+                    *gate = None;
+                    return Some(value);
+                }
+                Err(ClientError::Http(error)) => match *error {
+                    HttpError::StatusCode(response) => {
+                        let status = response.status();
+                        // Log only the endpoint, never authorization headers or token bodies.
+                        let endpoint = url::Url::parse(response.get_url())
+                            .ok()
+                            .map(|u| u.path().to_owned())
+                            .unwrap_or_default();
+                        if status == 401 && attempt == 0 {
+                            match crate::authentication::get_web_token(&self.cfg, true, false) {
+                                Ok(token) => {
+                                    *self.token_expiration.write().unwrap() =
+                                        token.expires_at.unwrap_or(Utc::now());
+                                    *self.api.token.lock().unwrap() = Some(token);
+                                    continue;
+                                }
+                                Err(e) => {
+                                    error!("Web API token refresh failed: {e}");
+                                    return None;
+                                }
+                            }
                         }
-                        401 => {
-                            debug!("token unauthorized. trying refresh..");
-                            self.update_token()
-                                .and_then(move |_| api_call(&self.api).ok())
+                        let delay = response
+                            .header("Retry-After")
+                            .and_then(|h| h.parse::<u64>().ok());
+                        let body: serde_json::Value = response.into_json().unwrap_or_default();
+                        let reason = body
+                            .pointer("/error/reason")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("unspecified");
+                        if status == 429 {
+                            let seconds = delay.unwrap_or(30).max(1);
+                            *gate = Instant::now().checked_add(Duration::from_secs(seconds));
+                            warn!(
+                                "Spotify Web API {endpoint}: HTTP 429, reason={reason}, Retry-After={seconds}s; deferring requests"
+                            );
+                        } else {
+                            error!("Spotify Web API {endpoint}: HTTP {status}, reason={reason}");
                         }
-                        _ => {
-                            error!("unhandled api error: {response:?}");
-                            None
-                        }
-                    },
-                    _ => None,
+                        return None;
+                    }
+                    e => {
+                        error!("Web API transport error: {e}");
+                        return None;
+                    }
+                },
+                Err(e) => {
+                    error!("Web API request failed: {e}");
+                    return None;
                 }
             }
-            Err(e) => {
-                error!("unhandled api error: {e}");
-                None
-            }
         }
+        None
     }
 
     /// Append `tracks` at `position` in the playlist with `playlist_id`.
@@ -296,8 +338,24 @@ impl WebApi {
     /// Fetch the playlist with the given `playlist_id`.
     pub fn playlist(&self, playlist_id: &str) -> Result<FullPlaylist, ()> {
         let pid = PlaylistId::from_id(playlist_id).map_err(|_| ())?;
-        self.api_with_retry(|api| api.playlist(pid.clone(), None, Some(Market::FromToken)))
-            .ok_or(())
+        self.api_with_retry(|api| {
+            let body = api.api_get(&format!("playlists/{}", pid.id()), &Default::default())?;
+            let mut playlist: serde_json::Value = serde_json::from_str(&body)?;
+            // rspotify's shadow model panics when Spotify omits restricted contents.
+            if playlist.get("items").is_none_or(|v| v.is_null())
+                && playlist.get("tracks").is_none_or(|v| v.is_null())
+            {
+                return Err(<serde_json::Error as serde::de::Error>::custom(
+                    "Playlist contents unavailable to this app",
+                )
+                .into());
+            }
+            if playlist.get("followers").is_none() {
+                playlist["followers"] = serde_json::json!({"href":null, "total":0});
+            }
+            Ok(serde_json::from_value(playlist)?)
+        })
+        .ok_or(())
     }
 
     /// Fetch the track with the given `track_id`.
@@ -321,39 +379,6 @@ impl WebApi {
             .ok_or(())
     }
 
-    /// Get recommendations based on the seeds provided with `seed_artists`, `seed_genres` and
-    /// `seed_tracks`.
-    pub fn recommendations(
-        &self,
-        seed_artists: Option<Vec<&str>>,
-        seed_genres: Option<Vec<&str>>,
-        seed_tracks: Option<Vec<&str>>,
-    ) -> Result<Recommendations, ()> {
-        self.api_with_retry(|api| {
-            let seed_artistids = seed_artists.as_ref().map(|artistids| {
-                artistids
-                    .iter()
-                    .map(|id| ArtistId::from_id(*id).unwrap())
-                    .collect::<Vec<ArtistId>>()
-            });
-            let seed_trackids = seed_tracks.as_ref().map(|trackids| {
-                trackids
-                    .iter()
-                    .map(|id| TrackId::from_id(*id).unwrap())
-                    .collect::<Vec<TrackId>>()
-            });
-            api.recommendations(
-                std::iter::empty(),
-                seed_artistids,
-                seed_genres.clone(),
-                seed_trackids,
-                Some(Market::FromToken),
-                Some(100),
-            )
-        })
-        .ok_or(())
-    }
-
     /// Search for items of `searchtype` using the provided `query`. Limit the results to `limit`
     /// items with the given `offset` from the start.
     pub fn search(
@@ -364,14 +389,29 @@ impl WebApi {
         offset: u32,
     ) -> Result<SearchResult, ()> {
         self.api_with_retry(|api| {
-            api.search(
-                query,
-                searchtype,
-                Some(Market::FromToken),
-                None,
-                Some(limit),
-                Some(offset),
-            )
+            let limit = limit.min(10).to_string();
+            let offset = offset.to_string();
+            let params = [
+                ("q", query),
+                ("type", searchtype.into()),
+                ("market", "from_token"),
+                ("limit", limit.as_str()),
+                ("offset", offset.as_str()),
+            ]
+            .into_iter()
+            .collect();
+            let body = api.api_get("search", &params)?;
+            let mut result: serde_json::Value = serde_json::from_str(&body)?;
+            if let Some(items) = result
+                .pointer_mut("/playlists/items")
+                .and_then(|v| v.as_array_mut())
+            {
+                items.retain(|p| !p.is_null());
+                for playlist in items {
+                    normalize_playlist_reference(playlist);
+                }
+            }
+            Ok(serde_json::from_value(result)?)
         })
         .ok_or(())
     }
@@ -383,7 +423,33 @@ impl WebApi {
         let fetch_page = move |offset: u32| {
             debug!("fetching user playlists, offset: {offset}");
             spotify.api_with_retry(|api| {
-                match api.current_user_playlists_manual(Some(MAX_LIMIT), Some(offset)) {
+                match api
+                    .api_get(
+                        "me/playlists",
+                        &[("limit", "50"), ("offset", offset.to_string().as_str())]
+                            .into_iter()
+                            .collect(),
+                    )
+                    .and_then(|body| {
+                        let mut page: serde_json::Value = serde_json::from_str(&body)?;
+                        if let Some(items) = page.get_mut("items").and_then(|v| v.as_array_mut()) {
+                            // Development-mode apps can read only owned/collaborative contents.
+                            if spotify.cfg.values().client_id.is_some() {
+                                items.retain(|p| {
+                                    p.pointer("/owner/id").and_then(|v| v.as_str())
+                                        == spotify.user.as_deref()
+                                        || p.get("collaborative").and_then(|v| v.as_bool())
+                                            == Some(true)
+                                });
+                            }
+                            for item in items {
+                                normalize_playlist_reference(item);
+                            }
+                        }
+                        Ok(serde_json::from_value::<
+                            Page<rspotify::model::SimplifiedPlaylist>,
+                        >(page)?)
+                    }) {
                     Ok(page) => Ok(ApiPage {
                         offset: page.offset,
                         total: page.total,
@@ -398,7 +464,7 @@ impl WebApi {
 
     /// Get the tracks in the playlist given by `playlist_id`.
     pub fn user_playlist_tracks(&self, playlist_id: &str) -> ApiResult<Playable> {
-        const MAX_LIMIT: u32 = 100;
+        const MAX_LIMIT: u32 = 50;
         let spotify = self.clone();
         let playlist_id = playlist_id.to_string();
         let fetch_page = move |offset: u32| {
@@ -741,5 +807,104 @@ impl WebApi {
     /// Get details about the logged in user.
     pub fn current_user(&self) -> Result<PrivateUser, ()> {
         self.api_with_retry(|api| api.current_user()).ok_or(())
+    }
+}
+
+// Track counts are optional for restricted playlists in development mode.
+fn normalize_playlist_reference(playlist: &mut serde_json::Value) {
+    if playlist.get("items").is_none_or(|v| v.is_null())
+        && playlist.get("tracks").is_none_or(|v| v.is_null())
+    {
+        playlist["items"] = serde_json::json!({"href":"", "total":0});
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn rate_limit_blocks_clones_without_sleeping_or_retrying() {
+        let api = WebApi::new(crate::config::Config::new_for_test());
+        let calls = AtomicUsize::new(0);
+        let started = Instant::now();
+        let result: Option<()> = api.api_with_retry(|_| {
+            calls.fetch_add(1, Ordering::Relaxed);
+            let response = "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 3600\r\nContent-Type: application/json\r\n\r\n{\"error\":{\"status\":429}}".parse::<ureq::Response>().unwrap();
+            Err(ClientError::Http(Box::new(HttpError::StatusCode(response))))
+        });
+        assert!(result.is_none());
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(api.retry_after().unwrap() > Duration::from_secs(3590));
+        let result = api.clone().api_with_retry(|_| {
+            calls.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        });
+        assert!(result.is_none());
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        *api.request_gate.lock().unwrap() = Some(Instant::now());
+        assert_eq!(api.api_with_retry(|_| Ok(42)), Some(42));
+        assert!(api.retry_after().is_none());
+    }
+
+    #[test]
+    fn restricted_playlist_reference_deserializes_without_panicking() {
+        let mut playlist = serde_json::json!({
+            "collaborative":false, "external_urls":{}, "href":"", "id":"abc",
+            "images":[], "name":"Restricted", "owner":{"id":"owner", "external_urls":{}, "href":""},
+            "public":true, "snapshot_id":"snapshot"
+        });
+        normalize_playlist_reference(&mut playlist);
+        let parsed: rspotify::model::SimplifiedPlaylist = serde_json::from_value(playlist).unwrap();
+        assert_eq!(parsed.items.total, 0);
+    }
+
+    #[test]
+    #[ignore = "requires personal Web API browser authorization and network access"]
+    fn live_personal_library_access() {
+        let cfg = Arc::new(crate::config::Config::new(None));
+        assert!(
+            cfg.values().client_id.is_some(),
+            "configure a personal client first"
+        );
+        let token = crate::authentication::get_web_token(&cfg, false, false).unwrap();
+        let mut api = WebApi::new(cfg);
+        *api.api.token.lock().unwrap() = Some(token);
+        let started = Instant::now();
+        let user = api.current_user().expect("profile");
+        api.set_user(Some(user.id.id().to_owned()));
+        let playlists = api.current_user_playlist();
+        assert!(playlists.first_page_loaded(), "playlist enumeration");
+        let playlists = playlists.items.read().unwrap();
+        println!(
+            "Profile and first playlist page: {} accessible playlists in {:.2}s",
+            playlists.len(),
+            started.elapsed().as_secs_f64()
+        );
+        if let Some(playlist) = playlists.first() {
+            let tracks = api.user_playlist_tracks(&playlist.id);
+            assert!(tracks.first_page_loaded(), "playlist items");
+            println!(
+                "First playlist: {} total songs; {} loaded",
+                tracks.total,
+                tracks.items.read().unwrap().len()
+            );
+            api.playlist(&playlist.id).expect("full playlist metadata");
+        }
+        let saved = api.current_user_saved_tracks(0).expect("liked songs");
+        println!(
+            "Liked songs: {} total; {} loaded",
+            saved.total,
+            saved.items.len()
+        );
+        api.search(SearchType::Track, "Radiohead", 50, 0)
+            .expect("track search");
+        api.search(SearchType::Playlist, "Radiohead", 50, 0)
+            .expect("playlist search");
+        println!(
+            "All live Web API checks passed in {:.2}s",
+            started.elapsed().as_secs_f64()
+        );
     }
 }

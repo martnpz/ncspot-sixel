@@ -1,4 +1,6 @@
 use std::cmp::Ordering;
+use std::collections::HashSet;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, RwLock};
 
 use log::{debug, info};
@@ -48,6 +50,7 @@ pub struct Queue {
     events: EventManager,
     cfg: Arc<Config>,
     library: Arc<Library>,
+    smart_generation: AtomicU64,
 }
 
 impl Queue {
@@ -61,7 +64,9 @@ impl Queue {
 
         // Clamp current_track to a valid index in case a previous run persisted
         // a corrupted out-of-bounds value (e.g. from a buggy bulk removal).
-        let current_track = queue_state.current_track.filter(|&i| i < queue_state.queue.len());
+        let current_track = queue_state
+            .current_track
+            .filter(|&i| i < queue_state.queue.len());
 
         Self {
             queue: Arc::new(RwLock::new(queue_state.queue)),
@@ -71,6 +76,7 @@ impl Queue {
             events,
             cfg,
             library,
+            smart_generation: AtomicU64::new(0),
         }
     }
 
@@ -144,7 +150,9 @@ impl Queue {
         if let Some(index) = self.get_current_index() {
             let mut random_order = self.random_order.write().unwrap();
             if let Some(order) = random_order.as_mut() {
-                let Some(next_i) = order.iter().position(|&i| i == index) else { return; };
+                let Some(next_i) = order.iter().position(|&i| i == index) else {
+                    return;
+                };
                 // shift everything after the insertion in order
                 for item in order.iter_mut() {
                     if *item > index {
@@ -265,6 +273,7 @@ impl Queue {
 
     /// Clear all the items from the queue and stop playback.
     pub fn clear(&self) {
+        self.smart_generation.fetch_add(1, AtomicOrdering::Relaxed);
         self.stop();
 
         let mut q = self.queue.write().unwrap();
@@ -284,6 +293,7 @@ impl Queue {
     ///
     /// Never holds a queue guard across play() — see next() for the rationale.
     pub fn replace_and_play_index(&self, tracks: Vec<Playable>, index: usize) {
+        self.smart_generation.fetch_add(1, AtomicOrdering::Relaxed);
         if tracks.is_empty() {
             return;
         }
@@ -297,6 +307,9 @@ impl Queue {
         // reshuffle=true rebuilds it (around `index`) when shuffle is on.
         *self.random_order.write().unwrap() = None;
         self.play(index, true, false);
+        if self.get_shuffle() && self.cfg.state().smart_shuffle_visual {
+            self.start_smart_shuffle();
+        }
     }
 
     /// The amount of items in `self.queue`.
@@ -374,8 +387,7 @@ impl Queue {
             #[cfg(feature = "mpris")]
             self.spotify.notify_seeked(0);
 
-            self.events
-                .send(Event::TrackChanged(Box::new(track)));
+            self.events.send(Event::TrackChanged(Box::new(track)));
         }
 
         if reshuffle && self.get_shuffle() {
@@ -511,26 +523,22 @@ impl Queue {
 
     /// (Re)generate the random shuffle order.
     fn generate_random_order(&self) {
-        // Snapshot lengths/indices under short, non-overlapping locks so we never
-        // hold queue + current_track (and later random_order) guards together.
-        let len = self.queue.read().unwrap().len();
         let current = *self.current_track.read().unwrap();
-
-        let mut order: Vec<usize> = Vec::with_capacity(len);
-        let mut random: Vec<usize> = (0..len).collect();
-        if let Some(current) = current
-            && current < len
-        {
-            order.push(current);
-            random.remove(current);
+        let smart = self.cfg.state().smart_shuffle_visual;
+        let mut queue = self.queue.write().unwrap();
+        let suggested: Vec<_> = queue.iter().map(Playable::is_suggested).collect();
+        let mut order = shuffle_order(&suggested, current, smart);
+        if smart {
+            // Materialize smart order so queue rows, selection and playback agree.
+            // Only the active queue changes; the source playlist is untouched.
+            *queue = order.iter().map(|&i| queue[i].clone()).collect();
         }
-
-        let mut rng = rand::rng();
-        random.shuffle(&mut rng);
-        order.extend(random);
-
-        let mut random_order = self.random_order.write().unwrap();
-        *random_order = Some(order);
+        drop(queue);
+        if smart {
+            *self.current_track.write().unwrap() = current.filter(|&i| i < order.len()).map(|_| 0);
+            order = (0..order.len()).collect();
+        }
+        *self.random_order.write().unwrap() = Some(order);
     }
 
     /// Regenerate the shuffle order if shuffle is active, keeping the currently
@@ -544,6 +552,7 @@ impl Queue {
 
     /// Set the current shuffle behavior.
     pub fn set_shuffle(&self, new: bool) {
+        self.smart_generation.fetch_add(1, AtomicOrdering::Relaxed);
         self.cfg.with_state_mut(|s| s.shuffle = new);
         if new {
             self.generate_random_order();
@@ -571,17 +580,81 @@ impl Queue {
         self.spotify.clone()
     }
 
-    /// Return up to `limit` track IDs from non-suggested queue entries.
-    /// Used to seed the Spotify recommendations API for smart shuffle.
-    pub fn seed_track_ids(&self, limit: usize) -> Vec<String> {
-        self.queue
-            .read()
-            .unwrap()
-            .iter()
-            .filter(|t| !t.is_suggested())
-            .filter_map(|t| t.id())
-            .take(limit)
-            .collect()
+    pub fn start_smart_shuffle(&self) {
+        let generation = self.smart_generation.fetch_add(1, AtomicOrdering::Relaxed) + 1;
+        let queue_uris: Vec<String> = self.queue.read().unwrap().iter().map(|t| t.uri()).collect();
+        let excluded: HashSet<String> = queue_uris.iter().cloned().collect();
+        let contexts: Vec<String> = {
+            let mut rng = rand::rng();
+            queue_uris
+                .iter()
+                .filter(|u| u.starts_with("spotify:track:"))
+                .cloned()
+                .sample(&mut rng, 5)
+        };
+        if contexts.is_empty() {
+            return;
+        }
+        let limit = (queue_uris.len() / 2).max(10);
+        let session = self.spotify.session();
+        let events = self.events.clone();
+        self.events.send(Event::Message(Ok(
+            "Loading smart shuffle suggestions…".to_owned()
+        )));
+        std::thread::spawn(move || {
+            let result = match session {
+                Some(session) => crate::application::ASYNC_RUNTIME.get().unwrap().block_on(
+                    crate::recommendations::fetch(&session, &contexts, &excluded, limit),
+                ),
+                None => Err("Spotify playback session is not connected".to_owned()),
+            };
+            events.send(Event::SmartShuffleReady {
+                generation,
+                queue_uris,
+                result,
+            });
+        });
+    }
+
+    /// Called by the UI thread. Ignore requests completed after a toggle or queue replacement.
+    pub fn finish_smart_shuffle(
+        &self,
+        generation: u64,
+        expected: &[String],
+        result: Result<Vec<crate::model::track::Track>, String>,
+    ) {
+        if generation != self.smart_generation.load(AtomicOrdering::Relaxed)
+            || !self.cfg.state().smart_shuffle_visual
+            || !self.get_shuffle()
+        {
+            return;
+        }
+        let actual: Vec<String> = self.queue.read().unwrap().iter().map(|t| t.uri()).collect();
+        if actual != expected {
+            return;
+        }
+        match result {
+            Ok(tracks) => {
+                let mut seen: HashSet<String> = actual.into_iter().collect();
+                let tracks: Vec<_> = tracks
+                    .into_iter()
+                    .filter(|t| t.is_playable != Some(false) && seen.insert(t.uri.clone()))
+                    .map(|mut t| {
+                        t.is_suggested = true;
+                        Playable::Track(t)
+                    })
+                    .collect();
+                let count = tracks.len();
+                self.append_all(tracks);
+                self.reshuffle();
+                self.events.send(Event::Message(Ok(format!(
+                    "Smart shuffle added {count} suggestions"
+                ))));
+            }
+            Err(e) => self
+                .events
+                .send(Event::Message(Err(format!("Smart shuffle: {e}")))),
+        }
     }
 
     /// Remove all suggested tracks (added by smart shuffle) from the queue,
@@ -626,6 +699,43 @@ impl Queue {
             self.generate_random_order();
         }
     }
+}
+
+/// Keep the current track first; interleave one suggestion per two playlist tracks.
+/// Excess suggestions (notably on short playlists) follow at the end.
+fn shuffle_order(suggested: &[bool], current: Option<usize>, smart: bool) -> Vec<usize> {
+    let current = current.filter(|&i| i < suggested.len());
+    let mut rng = rand::rng();
+    if !smart {
+        let mut rest: Vec<_> = (0..suggested.len())
+            .filter(|i| Some(*i) != current)
+            .collect();
+        rest.shuffle(&mut rng);
+        return current.into_iter().chain(rest).collect();
+    }
+    let mut original: Vec<_> = (0..suggested.len())
+        .filter(|&i| !suggested[i] && Some(i) != current)
+        .collect();
+    let mut extra: Vec<_> = (0..suggested.len())
+        .filter(|&i| suggested[i] && Some(i) != current)
+        .collect();
+    original.shuffle(&mut rng);
+    extra.shuffle(&mut rng);
+    let mut order: Vec<_> = current.into_iter().collect();
+    let mut since_suggestion = usize::from(current.is_some_and(|i| !suggested[i]));
+    let mut extra = extra.into_iter();
+    for i in original {
+        order.push(i);
+        since_suggestion += 1;
+        if since_suggestion == 2 {
+            if let Some(i) = extra.next() {
+                order.push(i);
+            }
+            since_suggestion = 0;
+        }
+    }
+    order.extend(extra);
+    order
 }
 
 /// Send a notification using the desktops default notification method.
@@ -717,7 +827,79 @@ mod tests {
             events: ev,
             cfg,
             library,
+            smart_generation: AtomicU64::new(0),
         }
+    }
+
+    #[test]
+    fn smart_order_inserts_one_suggestion_after_two_playlist_songs() {
+        let flags: Vec<_> = (0..30).map(|i| i >= 20).collect();
+        for current in [None, Some(7)] {
+            let order = shuffle_order(&flags, current, true);
+            assert_eq!(order.len(), flags.len());
+            if let Some(current) = current {
+                assert_eq!(order[0], current);
+            }
+            for chunk in order.chunks_exact(3) {
+                assert!(!flags[chunk[0]] && !flags[chunk[1]] && flags[chunk[2]]);
+            }
+            let mut sorted = order;
+            sorted.sort_unstable();
+            assert_eq!(sorted, (0..30).collect::<Vec<_>>());
+        }
+    }
+
+    #[test]
+    fn short_playlist_retains_ten_suggestions_and_current_song() {
+        let flags: Vec<_> = (0..13).map(|i| i >= 3).collect();
+        let order = shuffle_order(&flags, Some(1), true);
+        assert_eq!(order[0], 1);
+        assert_eq!(order.iter().filter(|&&i| flags[i]).count(), 10);
+        let mut sorted = order;
+        sorted.sort_unstable();
+        assert_eq!(sorted, (0..13).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn smart_queue_rows_match_playback_and_preserve_current_track() {
+        let tracks = (0..30)
+            .map(|i| {
+                let mut track = make_track(i);
+                if let Playable::Track(t) = &mut track {
+                    t.is_suggested = i >= 20;
+                }
+                track
+            })
+            .collect();
+        let q = make_queue(tracks, Some(7));
+        q.cfg.with_state_mut(|s| s.smart_shuffle_visual = true);
+        q.set_shuffle(true);
+        assert_eq!(q.get_current_index(), Some(0));
+        assert_eq!(q.next_index(), Some(1));
+        assert_eq!(q.get_random_order(), Some((0..30).collect()));
+        let rows = q.queue.read().unwrap();
+        assert_eq!(track_id(&rows[0]), "id_7");
+        for chunk in rows.chunks_exact(3) {
+            assert!(
+                !chunk[0].is_suggested() && !chunk[1].is_suggested() && chunk[2].is_suggested()
+            );
+        }
+    }
+
+    #[test]
+    fn stale_smart_shuffle_results_do_not_change_the_queue() {
+        let q = make_queue(vec![make_track(1), make_track(2)], Some(0));
+        q.set_shuffle(true);
+        q.cfg.with_state_mut(|s| s.smart_shuffle_visual = true);
+        let expected: Vec<_> = q.queue.read().unwrap().iter().map(Playable::uri).collect();
+        let Playable::Track(track) = make_track(3) else {
+            unreachable!()
+        };
+        q.finish_smart_shuffle(0, &expected, Ok(vec![track.clone()]));
+        assert_eq!(q.len(), 2);
+        let generation = q.smart_generation.load(AtomicOrdering::Relaxed);
+        q.finish_smart_shuffle(generation, &["different queue".to_owned()], Ok(vec![track]));
+        assert_eq!(q.len(), 2);
     }
 
     // --- next_index / previous_index ---

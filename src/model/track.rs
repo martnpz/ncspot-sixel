@@ -282,12 +282,11 @@ impl ListItem for Track {
 
         let recommendations: Option<Vec<Self>> = if let Some(id) = &self.id {
             spotify
-                .api
                 .recommendations(None, None, Some(vec![id]))
                 .ok()
                 .map(|r| r.tracks)
                 .map(|tracks| tracks.iter().map(|t| {
-                    let mut track = Self::from(t);
+                    let mut track = t.clone();
                     track.is_suggested = true;
                     track
                 }).collect())

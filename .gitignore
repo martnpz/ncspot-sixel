@@ -15,8 +15,34 @@ tags
 
 # Ignore generated resources
 *.1
+# This versioned source directory is required by Cargo's local patch.
+!/vendor/cursive-0.21.1/
+/vendor/cursive-0.21.1/.cargo-ok
 /misc/_ncspot
 /misc/ncspot.bash
 /misc/ncspot.fish
 /misc/ncspot.elv
 /misc/_ncspot.ps1
+
+# Local configuration, credentials and runtime caches
+/config.toml
+/config.toml.*
+!/config.toml.example
+.env
+.env.*
+!.env.example
+rspotify_token*.json
+credentials.json
+userstate.cbor
+/librespot/
+/cache/
+/covers/
+/*.db
+
+# Private keys and credential bundles
+*.key
+*.pem
+*.p12
+*.pfx
+*.jks
+*.keystore

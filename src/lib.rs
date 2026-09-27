@@ -44,5 +44,8 @@ pub fn program_arguments() -> clap::Command {
                 .help("Filename of config file in basepath")
                 .default_value(CONFIGURATION_FILE_NAME),
         )
-        .subcommands([clap::Command::new("info").about("Print platform information like paths")])
+        .subcommands([
+            clap::Command::new("info").about("Print platform information like paths"),
+            clap::Command::new("authorize").about("Authorize the configured Web API app without starting playback"),
+        ])
 }

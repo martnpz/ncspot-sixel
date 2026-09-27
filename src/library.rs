@@ -5,7 +5,7 @@ use std::path::Path;
 use std::sync::{Arc, RwLock};
 use std::thread;
 
-use log::{debug, error, info};
+use log::{debug, error};
 use rspotify::model::Id;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -142,32 +142,6 @@ impl Library {
         }
     }
 
-    /// Check whether the `remote` [Playlist] is newer than its locally saved version. Returns
-    /// `true` if it is or if a local version isn't found.
-    fn needs_download(&self, remote: &Playlist) -> bool {
-        self.playlists
-            .read()
-            .unwrap()
-            .iter()
-            .find(|local| local.id == remote.id)
-            .map(|local| local.snapshot_id != remote.snapshot_id)
-            .unwrap_or(true)
-    }
-
-    /// Append `updated` to the local playlists or update the local version if it exists. Return the
-    /// index of the appended/updated playlist.
-    fn append_or_update(&self, updated: Playlist) -> usize {
-        let mut store = self.playlists.write().unwrap();
-        for (index, local) in store.iter_mut().enumerate() {
-            if local.id == updated.id {
-                *local = updated;
-                return index;
-            }
-        }
-        store.push(updated);
-        store.len() - 1
-    }
-
     /// Delete the playlist with the given `id` if it exists.
     pub fn delete_playlist(&self, id: &str) {
         if !*self.is_done.read().unwrap() {
@@ -198,7 +172,9 @@ impl Library {
         debug!("saving {} tracks to list {}", tracks.len(), id);
         self.spotify.api.overwrite_playlist(id, tracks);
 
-        self.fetch_playlists();
+        if !self.fetch_playlists() {
+            return;
+        }
         self.save_cache(
             &config::cache_path(CACHE_PLAYLISTS),
             &self.playlists.read().unwrap(),
@@ -229,6 +205,11 @@ impl Library {
 
     /// True when the library hasn't been synced within [LIBRARY_SYNC_TTL_SECS].
     fn sync_due(&self) -> bool {
+        if self.cfg.state().library_client_id.as_deref()
+            != Some(crate::authentication::web_api_client_id(&self.cfg).as_str())
+        {
+            return true;
+        }
         match self.cfg.state().last_library_sync {
             Some(last) => chrono::Utc::now().timestamp() - last >= LIBRARY_SYNC_TTL_SECS,
             None => true,
@@ -237,219 +218,164 @@ impl Library {
 
     /// Record the current time as the last successful library sync.
     fn mark_synced(&self) {
-        self.cfg
-            .with_state_mut(|state| state.last_library_sync = Some(chrono::Utc::now().timestamp()));
+        self.cfg.with_state_mut(|state| {
+            state.last_library_sync = Some(chrono::Utc::now().timestamp());
+            state.library_client_id = Some(crate::authentication::web_api_client_id(&self.cfg));
+        });
         self.cfg.save_state();
     }
 
     fn run_update(&self, force: bool) {
         *self.is_done.write().unwrap() = false;
-
         let should_sync = force || self.sync_due();
-        if !should_sync {
-            debug!("library cache is fresh; loading from disk and skipping API re-sync");
-        }
-
         let library = self.clone();
         thread::spawn(move || {
-            let t_tracks = {
-                let library = library.clone();
-                thread::spawn(move || {
-                    library.load_cache(
-                        &config::cache_path(CACHE_TRACKS),
-                        library.tracks.write().unwrap().as_mut(),
-                    );
-                    if should_sync {
-                        library.fetch_tracks();
-                        library.save_cache(
-                            &config::cache_path(CACHE_TRACKS),
-                            &library.tracks.read().unwrap(),
-                        );
-                    }
-                })
-            };
-
-            let t_albums = {
-                let library = library.clone();
-                thread::spawn(move || {
-                    library.load_cache(
-                        &config::cache_path(CACHE_ALBUMS),
-                        library.albums.write().unwrap().as_mut(),
-                    );
-                    if should_sync {
-                        library.fetch_albums();
-                        library.save_cache(
-                            &config::cache_path(CACHE_ALBUMS),
-                            &library.albums.read().unwrap(),
-                        );
-                    }
-                })
-            };
-
-            let t_artists = {
-                let library = library.clone();
-                thread::spawn(move || {
-                    library.load_cache(
-                        &config::cache_path(CACHE_ARTISTS),
-                        library.artists.write().unwrap().as_mut(),
-                    );
-                    if should_sync {
-                        library.fetch_artists();
-                    }
-                })
-            };
-
-            let t_playlists = {
-                let library = library.clone();
-                thread::spawn(move || {
-                    library.load_cache(
+            library.load_cache(
+                &config::cache_path(CACHE_PLAYLISTS),
+                &mut library.playlists.write().unwrap(),
+            );
+            library.load_cache(
+                &config::cache_path(CACHE_TRACKS),
+                &mut library.tracks.write().unwrap(),
+            );
+            library.load_cache(
+                &config::cache_path(CACHE_ALBUMS),
+                &mut library.albums.write().unwrap(),
+            );
+            library.load_cache(
+                &config::cache_path(CACHE_ARTISTS),
+                &mut library.artists.write().unwrap(),
+            );
+            library.load_cache(
+                &config::cache_path(CACHE_SHOWS),
+                &mut library.shows.write().unwrap(),
+            );
+            if should_sync {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+                let playlists = library.sync_section(Self::fetch_playlists, deadline);
+                if playlists {
+                    library.save_cache(
                         &config::cache_path(CACHE_PLAYLISTS),
-                        library.playlists.write().unwrap().as_mut(),
+                        &library.playlists.read().unwrap(),
                     );
-                    if should_sync {
-                        library.fetch_playlists();
-                        library.save_cache(
-                            &config::cache_path(CACHE_PLAYLISTS),
-                            &library.playlists.read().unwrap(),
-                        );
-                    }
-                })
-            };
-
-            let t_shows = {
-                let library = library.clone();
-                thread::spawn(move || {
-                    library.load_cache(
+                }
+                let tracks = library.sync_section(Self::fetch_tracks, deadline);
+                if tracks {
+                    library.save_cache(
+                        &config::cache_path(CACHE_TRACKS),
+                        &library.tracks.read().unwrap(),
+                    );
+                }
+                let albums = library.sync_section(Self::fetch_albums, deadline);
+                if albums {
+                    library.save_cache(
+                        &config::cache_path(CACHE_ALBUMS),
+                        &library.albums.read().unwrap(),
+                    );
+                }
+                let artists = library.sync_section(Self::fetch_artists, deadline);
+                if artists && tracks {
+                    library.populate_artists();
+                    library.save_cache(
+                        &config::cache_path(CACHE_ARTISTS),
+                        &library.artists.read().unwrap(),
+                    );
+                }
+                let shows = library.sync_section(Self::fetch_shows, deadline);
+                if shows {
+                    library.save_cache(
                         &config::cache_path(CACHE_SHOWS),
-                        library.shows.write().unwrap().as_mut(),
+                        &library.shows.read().unwrap(),
                     );
-                    if should_sync {
-                        library.fetch_shows();
-                        library.save_cache(
-                            &config::cache_path(CACHE_SHOWS),
-                            &library.shows.read().unwrap(),
-                        );
-                    }
-                })
-            };
-
-            t_tracks.join().unwrap();
-            t_artists.join().unwrap();
-
-            if should_sync {
-                library.populate_artists();
-                library.save_cache(
-                    &config::cache_path(CACHE_ARTISTS),
-                    &library.artists.read().unwrap(),
-                );
+                }
+                if playlists && tracks && albums && artists && shows {
+                    library.mark_synced();
+                } else {
+                    library.ev.send(crate::events::Event::Message(Err(
+                        "Library refresh incomplete; cached data retained. Use :update to retry."
+                            .to_owned(),
+                    )));
+                }
             }
-
-            t_albums.join().unwrap();
-            t_playlists.join().unwrap();
-            t_shows.join().unwrap();
-
-            if should_sync {
-                library.mark_synced();
-            }
-
             *library.is_done.write().unwrap() = true;
             library.ev.send(crate::events::Event::LibraryLoaded);
         });
     }
 
-    /// Fetch the shows from the web API and save them to the local library.
-    fn fetch_shows(&self) {
-        debug!("loading shows");
-
-        let mut saved_shows: Vec<Show> = Vec::new();
-        let mut shows_result = self.spotify.api.get_saved_shows(0).ok();
-
-        while let Some(shows) = shows_result {
-            saved_shows.extend(shows.items.iter().map(|show| (&show.show).into()));
-
-            // load next batch if necessary
-            shows_result = match shows.next {
-                Some(_) => {
-                    debug!("requesting shows again..");
-                    self.spotify
-                        .api
-                        .get_saved_shows(shows.offset + shows.items.len() as u32)
-                        .ok()
+    fn sync_section(&self, fetch: fn(&Self) -> bool, deadline: std::time::Instant) -> bool {
+        for attempt in 0..3 {
+            if let Some(wait) = self.spotify.api.retry_after() {
+                if wait >= deadline.saturating_duration_since(std::time::Instant::now()) {
+                    return false;
                 }
-                None => None,
+                self.ev.send(crate::events::Event::Message(Ok(format!(
+                    "Spotify is limiting requests; retrying in {} seconds",
+                    wait.as_secs() + 1
+                ))));
+                thread::sleep(wait + std::time::Duration::from_millis(100));
+            }
+            if fetch(self) {
+                self.trigger_redraw();
+                return true;
+            }
+            if attempt == 2 || self.spotify.api.retry_after().is_none() {
+                break;
             }
         }
+        false
+    }
 
-        *self.shows.write().unwrap() = saved_shows;
+    /// Fetch the shows from the web API and save them to the local library.
+    fn fetch_shows(&self) -> bool {
+        let mut saved = Vec::new();
+        let mut offset = 0;
+        loop {
+            let Ok(page) = self.spotify.api.get_saved_shows(offset) else {
+                return false;
+            };
+            offset = page.offset + page.items.len() as u32;
+            saved.extend(page.items.iter().map(|s| (&s.show).into()));
+            if page.next.is_none() {
+                break;
+            }
+            if page.items.is_empty() {
+                return false;
+            }
+        }
+        *self.shows.write().unwrap() = saved;
+        true
     }
 
     /// Fetch the playlists from the web API and save them to the local library. This synchronizes
     /// the local version with the remote, pruning removed playlists in the process.
-    fn fetch_playlists(&self) {
-        debug!("loading playlists");
-        let mut stale_lists = self.playlists.read().unwrap().clone();
-        let mut list_order = Vec::new();
-
-        let lists_page = self.spotify.api.current_user_playlist();
-        let mut lists_batch = Some(lists_page.items.read().unwrap().clone());
-        while let Some(lists) = lists_batch {
-            for (index, remote) in lists.iter().enumerate() {
-                list_order.push(remote.id.clone());
-
-                // remove from stale playlists so we won't prune it later on
-                if let Some(index) = stale_lists.iter().position(|x| x.id == remote.id) {
-                    stale_lists.remove(index);
-                }
-
-                if self.needs_download(remote) {
-                    info!("updating playlist {} (index: {})", remote.name, index);
-                    let mut playlist: Playlist = remote.clone();
-                    playlist.tracks = None;
-                    playlist.load_tracks(&self.spotify);
-                    self.append_or_update(playlist);
-                    // trigger redraw
-                    self.trigger_redraw();
-                } else if remote.cover_url.is_some() {
-                    // Tracks unchanged; patch cover_url on the cached entry in
-                    // case it was saved before cover_url was introduced.
-                    let mut store = self.playlists.write().unwrap();
-                    if let Some(local) = store.iter_mut().find(|p| p.id == remote.id)
-                        && local.cover_url.is_none()
-                    {
-                        local.cover_url = remote.cover_url.clone();
-                    }
+    fn fetch_playlists(&self) -> bool {
+        let page = self.spotify.api.current_user_playlist();
+        let Some(remote) = page.all() else {
+            return false;
+        };
+        // Never prune on failed enumeration. Fetch contents into temporary values.
+        let local = self.playlists.read().unwrap().clone();
+        let mut updated = Vec::new();
+        for mut playlist in remote {
+            if let Some(cached) = local.iter().find(|p| {
+                p.id == playlist.id && p.snapshot_id == playlist.snapshot_id && p.tracks.is_some()
+            }) {
+                playlist.tracks = cached.tracks.clone();
+                playlist.num_tracks = cached.tracks.as_ref().map_or(0, Vec::len);
+            } else {
+                playlist.load_tracks(&self.spotify);
+                if playlist.tracks.is_none() {
+                    return false;
                 }
             }
-            lists_batch = lists_page.next();
+            updated.push(playlist);
         }
-
-        // remove stale playlists
-        for stale in stale_lists {
-            let index = self
-                .playlists
-                .read()
-                .unwrap()
-                .iter()
-                .position(|x| x.id == stale.id);
-            if let Some(index) = index {
-                debug!("removing stale list: {:?}", stale.name);
-                self.playlists.write().unwrap().remove(index);
-            }
-        }
-
-        // sort by remote order
-        self.playlists.write().unwrap().sort_by(|a, b| {
-            let a_index = list_order.iter().position(|x| x == &a.id);
-            let b_index = list_order.iter().position(|x| x == &b.id);
-            a_index.cmp(&b_index)
-        });
-
-        // trigger redraw
-        self.trigger_redraw();
+        *self.playlists.write().unwrap() = updated;
+        true
     }
 
     /// Fetch the artists from the web API and save them to the local library.
-    fn fetch_artists(&self) {
+    fn fetch_artists(&self) -> bool {
         let mut artists: Vec<Artist> = Vec::new();
         let mut last: Option<&str> = None;
         let mut i = 0u32;
@@ -460,7 +386,7 @@ impl Library {
             i += 1;
             if page.is_err() {
                 error!("Failed to fetch artists.");
-                return;
+                return false;
             }
             let page = page.unwrap();
 
@@ -486,6 +412,7 @@ impl Library {
 
             store.push(artist);
         }
+        true
     }
 
     /// Add the artist with `id` and `name` to the user library, but don't sync with the API.
@@ -504,7 +431,7 @@ impl Library {
     }
 
     /// Fetch the albums from the web API and store them in the local library.
-    fn fetch_albums(&self) {
+    fn fetch_albums(&self) -> bool {
         let mut albums: Vec<Album> = Vec::new();
         let mut i = 0u32;
 
@@ -519,7 +446,7 @@ impl Library {
 
             if page.is_err() {
                 error!("Failed to fetch albums.");
-                return;
+                return false;
             }
 
             let page = page.unwrap();
@@ -544,10 +471,11 @@ impl Library {
         });
 
         *self.albums.write().unwrap() = albums;
+        true
     }
 
     /// Fetch the tracks from the web API and save them in the local library.
-    fn fetch_tracks(&self) {
+    fn fetch_tracks(&self) -> bool {
         let mut tracks = Vec::new();
         let mut i = 0u32;
 
@@ -562,7 +490,7 @@ impl Library {
 
             if page.is_err() {
                 error!("Failed to fetch tracks.");
-                return;
+                return false;
             }
             let page = page.unwrap();
 
@@ -579,7 +507,7 @@ impl Library {
                         .enumerate()
                         .any(|(i, t)| t.track.id.as_ref().map(|id| id.to_string()) != store[i].id)
                 {
-                    return;
+                    return true;
                 }
             }
 
@@ -591,6 +519,7 @@ impl Library {
         }
 
         *self.tracks.write().unwrap() = tracks;
+        true
     }
 
     fn populate_artists(&self) {
@@ -997,5 +926,54 @@ impl Library {
     /// Force redraw the user interface.
     pub fn trigger_redraw(&self) {
         self.ev.trigger();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rate_limited_refresh_preserves_cached_playlists_and_sync_timestamp() {
+        let cfg = Config::new_for_test();
+        let events = EventManager::new_for_test();
+        let spotify = Spotify::new_for_test(cfg.clone(), events.clone());
+        spotify.api.defer_requests_for_test();
+        let library = Library::new_for_test(events, spotify, cfg.clone());
+        let playlist = Playlist {
+            id: "cached".to_owned(),
+            name: "Cached playlist".to_owned(),
+            owner_id: "owner".to_owned(),
+            owner_name: None,
+            snapshot_id: "snapshot".to_owned(),
+            num_tracks: 0,
+            tracks: Some(vec![]),
+            collaborative: false,
+            cover_url: None,
+        };
+        library.playlists.write().unwrap().push(playlist);
+        cfg.with_state_mut(|s| s.last_library_sync = Some(123));
+        assert!(!library.fetch_playlists());
+        let playlists = library.playlists.read().unwrap();
+        assert_eq!(playlists.len(), 1);
+        assert_eq!(playlists[0].id, "cached");
+        assert_eq!(playlists[0].snapshot_id, "snapshot");
+        assert!(playlists[0].tracks.is_some());
+        assert_eq!(cfg.state().last_library_sync, Some(123));
+    }
+
+    #[test]
+    fn changing_web_api_app_forces_library_refresh() {
+        let cfg = Config::new_for_test();
+        let events = EventManager::new_for_test();
+        let spotify = Spotify::new_for_test(cfg.clone(), events.clone());
+        let library = Library::new_for_test(events, spotify, cfg.clone());
+        cfg.with_state_mut(|s| {
+            s.last_library_sync = Some(chrono::Utc::now().timestamp());
+            s.library_client_id = Some(crate::authentication::web_api_client_id(&cfg));
+        });
+        assert!(!library.sync_due());
+        cfg.with_state_mut(|s| s.library_client_id = Some("previous-client".to_owned()));
+        assert!(library.sync_due());
     }
 }

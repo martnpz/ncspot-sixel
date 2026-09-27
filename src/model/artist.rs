@@ -180,11 +180,9 @@ impl ListItem for Artist {
 
         let spotify = queue.get_spotify();
         let recommendations: Option<Vec<Track>> = spotify
-            .api
             .recommendations(Some(vec![&id]), None, None)
             .ok()
-            .map(|r| r.tracks)
-            .map(|tracks| tracks.iter().map(Track::from).collect());
+            .map(|r| r.tracks);
 
         recommendations.map(|tracks| {
             ListView::new(

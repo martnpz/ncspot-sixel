@@ -1,3 +1,7 @@
+# Optional personal Spotify Web API app. Register this exact callback in its dashboard.
+# client_id = "YOUR_32_CHARACTER_CLIENT_ID"
+# client_redirect_uri = "http://127.0.0.1:8989/login"
+
 # Example configuration for ncspot-sixel.
 # Copy to ~/.config/ncspot/config.toml and adjust to taste.
 # All keys are optional; the values shown here are the defaults unless noted.

@@ -109,6 +109,9 @@ pub struct ConfigValues {
     pub library_tabs: Option<Vec<LibraryTab>>,
     pub hide_display_names: Option<bool>,
     pub ap_port: Option<u16>,
+    /// Personal Web API app ID. Playback authentication remains separate.
+    pub client_id: Option<String>,
+    pub client_redirect_uri: Option<String>,
     pub device_name: Option<String>,
     pub layout: Option<LayoutConfig>,
     pub statusbar: Option<StatusbarConfig>,
@@ -463,8 +466,7 @@ pub struct LastOpenedItem {
 pub struct UserState {
     pub volume: u16,
     pub shuffle: bool,
-    /// Visual-only flag: when true the shuffle button shows the "smart shuffle" icon.
-    /// Playback behaviour is identical to regular shuffle.
+    /// Smart shuffle interleaves session-based suggestions into the playback order.
     #[serde(default)]
     pub smart_shuffle_visual: bool,
     pub repeat: queue::RepeatSetting,
@@ -475,6 +477,8 @@ pub struct UserState {
     /// re-syncing on launch behind a freshness TTL.
     #[serde(default)]
     pub last_library_sync: Option<i64>,
+    #[serde(default)]
+    pub library_client_id: Option<String>,
     pub playback_state: PlaybackState,
     /// Last opened playlist or album; re-fetched on startup.
     #[serde(default)]
@@ -492,6 +496,7 @@ impl Default for UserState {
             playlist_orders: HashMap::new(),
             cache_version: 0,
             last_library_sync: None,
+            library_client_id: None,
             playback_state: PlaybackState::Default,
             last_opened: None,
         }

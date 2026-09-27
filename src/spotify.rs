@@ -84,7 +84,7 @@ impl Spotify {
             credentials,
             cfg: cfg.clone(),
             status: Arc::new(RwLock::new(PlayerEvent::Stopped)),
-            api: WebApi::new(),
+            api: WebApi::new(cfg.clone()),
             elapsed: Arc::new(RwLock::new(None)),
             since: Arc::new(RwLock::new(None)),
             channel: Arc::new(RwLock::new(None)),
@@ -117,9 +117,9 @@ impl Spotify {
             #[cfg(feature = "mpris")]
             mpris: Default::default(),
             credentials: Credentials::with_password("test_user", "test_pass"),
-            cfg,
+            cfg: cfg.clone(),
             status: Arc::new(RwLock::new(PlayerEvent::Stopped)),
-            api: WebApi::new(),
+            api: WebApi::new(cfg.clone()),
             elapsed: Arc::new(RwLock::new(None)),
             since: Arc::new(RwLock::new(None)),
             channel: Arc::new(RwLock::new(None)),
@@ -366,6 +366,24 @@ impl Spotify {
         *worker_channel.write().unwrap() = None;
         *session_handle.write().unwrap() = None;
         events.send(Event::SessionDied)
+    }
+
+    pub fn recommendations(
+        &self,
+        seed_artists: Option<Vec<&str>>,
+        _seed_genres: Option<Vec<&str>>,
+        seed_tracks: Option<Vec<&str>>,
+    ) -> Result<crate::recommendations::Recommendations, ()> {
+        let Some(session) = self.session() else { return Err(()); };
+        let mut contexts: Vec<String> = seed_tracks.unwrap_or_default().into_iter()
+            .map(|id| format!("spotify:track:{id}")).collect();
+        contexts.extend(seed_artists.unwrap_or_default().into_iter().map(|id| format!("spotify:artist:{id}")));
+        let excluded = contexts.iter().cloned().collect();
+        let result = ASYNC_RUNTIME.get().unwrap().block_on(crate::recommendations::fetch(&session, &contexts, &excluded, 50));
+        result.map(|tracks| crate::recommendations::Recommendations { tracks }).map_err(|e| {
+            error!("Recommendations unavailable: {e}");
+            self.events.send(Event::Message(Err("Spotify suggestions could not be loaded; try again shortly".to_owned())));
+        })
     }
 
     /// Get the current playback status of the [Player].

@@ -511,13 +511,13 @@ impl BrowserView {
                 return;
             }
             let seeds: Vec<&str> = seed_ids.iter().map(String::as_str).collect();
-            match spotify.api.recommendations(None, None, Some(seeds)) {
+            match spotify.recommendations(None, None, Some(seeds)) {
                 Ok(recommendations) => {
                     let tracks: Vec<Playable> = recommendations
                         .tracks
                         .iter()
                         .map(|t| {
-                            let mut track = crate::model::track::Track::from(t);
+                            let mut track = t.clone();
                             track.is_suggested = true;
                             Playable::Track(track)
                         })

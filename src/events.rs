@@ -14,6 +14,12 @@ pub enum Event {
     TrackChanged(Box<Playable>),
     /// The library has finished its initial load from Spotify / local cache.
     LibraryLoaded,
+    Message(Result<String, String>),
+    SmartShuffleReady {
+        generation: u64,
+        queue_uris: Vec<String>,
+        result: Result<Vec<crate::model::track::Track>, String>,
+    },
     SessionDied,
     IpcInput(String),
 }

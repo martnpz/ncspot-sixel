@@ -1,3 +1,4 @@
+use crate::ext_traits::CursiveExt;
 use std::error::Error;
 use std::path::Path;
 use std::rc::Rc;
@@ -45,6 +46,9 @@ pub fn setup_logging(filename: &Path) -> Result<(), fern::InitError> {
         .level(log::LevelFilter::Debug)
         // Set runtime log level for modules
         .level_for("ncspot", log::LevelFilter::Trace)
+        // HTTP debug logs can contain bearer credentials.
+        .level_for("rspotify", log::LevelFilter::Warn)
+        .level_for("rspotify_http", log::LevelFilter::Warn)
         // Output to stdout, files, and other Dispatch configurations
         .chain(fern::log_file(filename)?)
         // Apply globally
@@ -101,12 +105,15 @@ impl Application {
             .unwrap();
 
         let configuration = Arc::new(Config::new(configuration_file_path));
+        // Finish browser authorization before starting the player or library.
+        // Continuing without this token hides login failures behind an empty UI.
+        authentication::get_rspotify_token(&configuration).map_err(|e| {
+            format!(
+                "Web API login failed: {e}. If the callback address is already in use, close the other pending login, then restart ncspot and open its new login link."
+            )
+        })?;
         let credentials = authentication::get_credentials(&configuration)?;
         let theme = configuration.build_theme();
-
-        if let Err(e) = authentication::get_rspotify_token() {
-            error!("Failed to get rspotify token: {e}");
-        }
 
         println!("Connecting to Spotify..");
 
@@ -414,30 +421,29 @@ impl Application {
                         let last = self.configuration.state().last_opened.clone();
                         if let Some(item) = last {
                             let view = match item.kind.as_str() {
-                                "playlist" => self
-                                    .library
-                                    .playlists
-                                    .read()
-                                    .unwrap()
-                                    .iter()
-                                    .find(|p| p.id == item.id)
-                                    .cloned()
-                                    .and_then(|p| p.open(self.queue.clone(), self.library.clone())),
-                                "album" => self
-                                    .library
-                                    .albums
-                                    .read()
-                                    .unwrap()
-                                    .iter()
-                                    .find(|a| a.id.as_deref() == Some(item.id.as_str()))
-                                    .cloned()
-                                    .and_then(|a| a.open(self.queue.clone(), self.library.clone())),
+                                "playlist" => {
+                                    let playlist = self.library.playlists.read().unwrap()
+                                        .iter().find(|p| p.id == item.id).cloned();
+                                    // Release the list guard before constructing a view.
+                                    playlist.and_then(|p| p.open(self.queue.clone(), self.library.clone()))
+                                }
+                                "album" => {
+                                    let album = self.library.albums.read().unwrap()
+                                        .iter().find(|a| a.id.as_deref() == Some(item.id.as_str())).cloned();
+                                    album.and_then(|a| a.open(self.queue.clone(), self.library.clone()))
+                                }
                                 _ => None,
                             };
                             if let Some(view) = view {
                                 ui::panes::show_view(&mut self.cursive, view);
                             }
                         }
+                    }
+                    Event::Message(result) => {
+                        self.cursive.on_layout(|_, mut layout| layout.set_result(result.map(Some)));
+                    }
+                    Event::SmartShuffleReady { generation, queue_uris, result } => {
+                        self.queue.finish_smart_shuffle(generation, &queue_uris, result);
                     }
                     Event::SessionDied => {
                         if self.spotify.start_worker(None).is_err() {

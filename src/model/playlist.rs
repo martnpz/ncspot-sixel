@@ -31,21 +31,10 @@ pub struct Playlist {
 
 impl Playlist {
     pub fn load_tracks(&mut self, spotify: &Spotify) {
-        if self.tracks.is_some() {
-            return;
+        if self.tracks.is_none() {
+            self.tracks = spotify.api.user_playlist_tracks(&self.id).all();
+            if let Some(tracks) = &self.tracks { self.num_tracks = tracks.len(); }
         }
-
-        self.tracks = Some(self.get_all_tracks(spotify));
-    }
-
-    fn get_all_tracks(&self, spotify: &Spotify) -> Vec<Playable> {
-        let tracks_result = spotify.api.user_playlist_tracks(&self.id);
-        while !tracks_result.at_end() {
-            tracks_result.next();
-        }
-
-        let tracks = tracks_result.items.read().unwrap();
-        tracks.clone()
     }
 
     pub fn has_track(&self, track_id: &str) -> bool {
@@ -250,7 +239,9 @@ impl ListItem for Playlist {
         });
         let mut playlist = self.clone();
         playlist.load_tracks(&queue.get_spotify());
-        let tracks = playlist.tracks.unwrap_or_default();
+        // Opening a view must not write back to the library: callers may hold
+        // a read lock on the playlist list. Background sync owns cache updates.
+        let tracks = playlist.tracks?;
         let cfg = library.cfg.clone();
         Some(
             TrackListView::new(
@@ -291,15 +282,13 @@ impl ListItem for Playlist {
 
         let spotify = queue.get_spotify();
         let recommendations: Option<Vec<Track>> = spotify
-            .api
             .recommendations(
                 None,
                 None,
                 Some(track_ids.iter().map(|t| t.as_ref()).collect()),
             )
             .ok()
-            .map(|r| r.tracks)
-            .map(|tracks| tracks.iter().map(Track::from).collect());
+            .map(|r| r.tracks);
 
         recommendations.map(|tracks| {
             ListView::new(
@@ -335,5 +324,35 @@ impl ListItem for Playlist {
 
     fn as_listitem(&self) -> Box<dyn ListItem> {
         Box::new(self.clone())
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn opening_cached_playlist_does_not_wait_for_library_write_lock() {
+        let cfg = crate::config::Config::new_for_test();
+        let events = crate::events::EventManager::new_for_test();
+        let spotify = Spotify::new_for_test(cfg.clone(), events.clone());
+        let library = Library::new_for_test(events.clone(), spotify.clone(), cfg.clone());
+        let queue = Arc::new(Queue::new(spotify, events, cfg, library.clone()));
+        library.playlists.write().unwrap().push(Playlist {
+            id: "test-playlist".to_owned(), name: "Cached playlist".to_owned(),
+            owner_id: "owner".to_owned(), owner_name: None,
+            snapshot_id: "snapshot".to_owned(), num_tracks: 0, tracks: Some(vec![]),
+            collaborative: false, cover_url: None,
+        });
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            // Reproduce startup restoration and mouse-open holding a list read lock.
+            let playlists = library.playlists.read().unwrap();
+            let opened = playlists[0].open(queue, library.clone()).is_some();
+            tx.send(opened).unwrap();
+        });
+        assert!(rx.recv_timeout(std::time::Duration::from_secs(2))
+            .expect("opening a cached playlist deadlocked on its library lock"));
     }
 }

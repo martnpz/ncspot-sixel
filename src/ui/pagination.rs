@@ -12,6 +12,7 @@ pub type FetchPageFn<I> = dyn Fn(u32) -> Option<ApiPage<I>> + Send + Sync;
 pub struct ApiResult<I> {
     offset: Arc<RwLock<u32>>,
     limit: u32,
+    first_page_loaded: bool,
     pub total: u32,
     pub items: Arc<RwLock<Vec<I>>>,
     fetch_page: Arc<FetchPageFn<I>>,
@@ -30,6 +31,7 @@ impl<I: ListItem + Clone> ApiResult<I> {
             Self {
                 offset: Arc::new(RwLock::new(first_page.offset)),
                 limit,
+                first_page_loaded: true,
                 total: first_page.total,
                 items,
                 fetch_page: fetch_page.clone(),
@@ -38,11 +40,27 @@ impl<I: ListItem + Clone> ApiResult<I> {
             Self {
                 offset: Arc::new(RwLock::new(0)),
                 limit,
+                first_page_loaded: false,
                 total: 0,
                 items,
                 fetch_page: fetch_page.clone(),
             }
         }
+    }
+
+    pub fn first_page_loaded(&self) -> bool {
+        self.first_page_loaded
+    }
+
+    /// A failed page is not end-of-results. Callers must retain their old cache.
+    pub fn all(&self) -> Option<Vec<I>> {
+        if !self.first_page_loaded {
+            return None;
+        }
+        while !self.at_end() {
+            self.next()?;
+        }
+        Some(self.items.read().unwrap().clone())
     }
 
     fn offset(&self) -> u32 {
@@ -150,5 +168,55 @@ impl<I: ListItem + Clone> Pagination<I> {
                 }
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::category::Category;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn first_page_failure_is_distinct_from_an_empty_collection() {
+        let failed = ApiResult::<Category>::new(50, Arc::new(|_| None));
+        assert!(!failed.first_page_loaded());
+        assert!(failed.all().is_none());
+        let empty = ApiResult::<Category>::new(
+            50,
+            Arc::new(|_| {
+                Some(ApiPage {
+                    offset: 0,
+                    total: 0,
+                    items: vec![],
+                })
+            }),
+        );
+        assert!(empty.all().unwrap().is_empty());
+    }
+
+    #[test]
+    fn later_page_failure_stops_without_busy_loop_or_partial_success() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counter = calls.clone();
+        let result = ApiResult::new(
+            1,
+            Arc::new(move |offset| {
+                counter.fetch_add(1, Ordering::Relaxed);
+                if offset > 0 {
+                    return None;
+                }
+                Some(ApiPage {
+                    offset: 0,
+                    total: 2,
+                    items: vec![Category {
+                        id: "a".to_owned(),
+                        name: "A".to_owned(),
+                    }],
+                })
+            }),
+        );
+        assert!(result.all().is_none());
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
     }
 }

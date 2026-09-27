@@ -413,9 +413,10 @@ impl<I: ListItem + Clone> ListView<I> {
                         // The clicked position wasn't focused yet or the item is a collection
                         // that can be opened.
                         self.move_focus_to(clicked_row_index);
-                        let content = self.content.read().unwrap();
-                        let clicked_list_item =
-                            content.get(self.selected).map(ListItem::as_listitem);
+                        let clicked_list_item = {
+                            let content = self.content.read().unwrap();
+                            content.get(self.selected).map(ListItem::as_listitem)
+                        };
 
                         if let Some(target) = clicked_list_item
                             && let Some(view) =

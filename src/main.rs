@@ -25,6 +25,7 @@ mod lyrics;
 mod model;
 mod panic;
 mod queue;
+mod recommendations;
 mod serialization;
 mod sharing;
 mod spotify;
@@ -61,6 +62,12 @@ fn main() -> Result<(), String> {
 
     match matches.subcommand() {
         Some(("info", _subcommand_matches)) => cli::info(),
+        Some(("authorize", _)) => {
+            let cfg = config::Config::new(matches.get_one::<String>("config").cloned());
+            authentication::get_rspotify_token(&cfg)?;
+            println!("Web API authorization ready.");
+            Ok(())
+        }
         Some((_, _)) => unreachable!(),
         None => {
             // Create the application.

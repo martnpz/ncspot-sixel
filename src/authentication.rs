@@ -40,6 +40,7 @@ static OAUTH_SCOPES: &[&str] = &[
 ];
 
 static NCSPOT_OAUTH_SCOPES: &[&str] = &[
+    "playlist-read-collaborative",
     "streaming",
     "user-read-email",
     "user-read-private",
@@ -121,8 +122,51 @@ pub fn create_credentials() -> Result<RespotCredentials, String> {
         .map_err(|e| e.to_string())
 }
 
-pub fn get_rspotify_token() -> Result<rspotify::Token, String> {
-    let path = config::cache_path("rspotify_token.json");
+pub fn web_api_client_id(configuration: &Config) -> String {
+    configuration
+        .values()
+        .client_id
+        .clone()
+        .unwrap_or_else(|| NCSPOT_CLIENT_ID.to_owned())
+}
+
+fn token_filename(client_id: &str) -> Result<String, String> {
+    if client_id.len() != 32 || !client_id.bytes().all(|c| c.is_ascii_hexdigit()) {
+        return Err("client_id must contain exactly 32 hexadecimal characters".to_owned());
+    }
+    Ok(if client_id == NCSPOT_CLIENT_ID {
+        "rspotify_token.json".to_owned()
+    } else {
+        format!("rspotify_token-{client_id}.json")
+    })
+}
+
+fn web_api_redirect_uri(configuration: &Config) -> String {
+    configuration
+        .values()
+        .client_redirect_uri
+        .clone()
+        .unwrap_or_else(|| {
+            if web_api_client_id(configuration) == NCSPOT_CLIENT_ID {
+                get_client_redirect_uri()
+            } else {
+                "http://127.0.0.1:8989/login".to_owned()
+            }
+        })
+}
+
+pub fn get_rspotify_token(configuration: &Config) -> Result<rspotify::Token, String> {
+    get_web_token(configuration, false, true)
+}
+
+/// Background refreshes never launch an interactive browser authorization.
+pub fn get_web_token(
+    configuration: &Config,
+    force_refresh: bool,
+    interactive: bool,
+) -> Result<rspotify::Token, String> {
+    let client_id = web_api_client_id(configuration);
+    let path = config::cache_path(&token_filename(&client_id)?);
     let token = if let Ok(token_json) = fs::read_to_string(&path) {
         serde_json::from_str::<rspotify::Token>(&token_json).ok()
     } else {
@@ -130,7 +174,7 @@ pub fn get_rspotify_token() -> Result<rspotify::Token, String> {
     };
 
     if let Some(t) = token {
-        if !t.is_expired() {
+        if !force_refresh && !t.is_expired() {
             return Ok(t);
         }
 
@@ -141,8 +185,8 @@ pub fn get_rspotify_token() -> Result<rspotify::Token, String> {
         if let Some(refresh_token) = refresh_token {
             info!("Access token expired, attempting to refresh..");
             let client_builder = OAuthClientBuilder::new(
-                NCSPOT_CLIENT_ID,
-                &get_client_redirect_uri(),
+                &client_id,
+                &web_api_redirect_uri(configuration),
                 NCSPOT_OAUTH_SCOPES.to_vec(),
             );
             if let Ok(oauth_client) = client_builder.build() {
@@ -160,19 +204,22 @@ pub fn get_rspotify_token() -> Result<rspotify::Token, String> {
         }
     }
 
-    let t = create_rspotify_token()?;
+    if !interactive {
+        return Err("Web API authorization required; restart ncspot to sign in".to_owned());
+    }
+    let t = create_rspotify_token(configuration)?;
     write_token(&path, &t);
     Ok(t)
 }
 
-pub fn create_rspotify_token() -> Result<rspotify::Token, String> {
+pub fn create_rspotify_token(configuration: &Config) -> Result<rspotify::Token, String> {
     println!(
         "To fully enable Web API features, you need to perform a second OAuth2 authorization\n"
     );
 
     let client_builder = OAuthClientBuilder::new(
-        NCSPOT_CLIENT_ID,
-        &get_client_redirect_uri(),
+        &web_api_client_id(configuration),
+        &web_api_redirect_uri(configuration),
         NCSPOT_OAUTH_SCOPES.to_vec(),
     );
     let oauth_client = client_builder.build().map_err(|e| e.to_string())?;
@@ -245,6 +292,19 @@ fn map_token(
 #[cfg(test)]
 mod test {
     use super::*;
+
+    #[test]
+    fn token_caches_are_separate_for_each_app() {
+        assert_eq!(
+            token_filename(NCSPOT_CLIENT_ID).unwrap(),
+            "rspotify_token.json"
+        );
+        let first = token_filename("11111111111111111111111111111111").unwrap();
+        let second = token_filename("22222222222222222222222222222222").unwrap();
+        assert_ne!(first, second);
+        assert_ne!(first, "rspotify_token.json");
+        assert!(token_filename("../not-an-app").is_err());
+    }
 
     fn oauth_token(refresh_token: &str) -> librespot_oauth::OAuthToken {
         librespot_oauth::OAuthToken {

@@ -53,7 +53,9 @@ impl LibraryView {
                     ListView::new(library.shows.clone(), queue.clone(), library.clone()),
                 ),
                 LibraryTab::Browse => {
-                    tabview.add_tab("Browse", BrowseView::new(queue.clone(), library.clone()))
+                    if library.cfg.values().client_id.is_none() {
+                        tabview.add_tab("Browse", BrowseView::new(queue.clone(), library.clone()));
+                    }
                 }
             }
         }

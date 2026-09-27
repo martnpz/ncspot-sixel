@@ -553,3 +553,35 @@ The credentials are stored in `librespot/credentials.json` in the user's cache d
 
 The `logout` command can be used to remove cached credentials. See
 [Vim-Like Commands](#vim-like-commands).
+
+
+## Personal Web API app and smart shuffle
+
+To use a personal Spotify development-mode app, add `client_id` and
+`client_redirect_uri = "http://127.0.0.1:8989/login"` at the top level of
+`config.toml`. Register that exact redirect URI in the app's Developer Dashboard,
+then run `ncspot authorize` and complete the browser login. No client secret is
+required. Restart after changing these settings. Each app uses a separate token
+cache; the bundled app's existing token is preserved.
+
+Personal development-mode apps load owned and collaborative playlists. Other
+people's and Spotify-generated playlist contents are restricted by Spotify.
+Browse categories are omitted and search uses ten results per page.
+
+Suggestions use Radio/Autoplay through the authenticated playback session, not
+the restricted Web API Recommendations endpoint. Smart shuffle keeps the current
+song playing and inserts one suggestion after every two playlist songs in both
+the visible queue and playback order. It requests at least ten unique playable suggestions; for short
+playlists, the excess suggestions follow at the end. Spotify may return fewer.
+Turning smart shuffle off removes suggestions except one already playing.
+Suggestions that finish after a queue change or shuffle toggle are ignored.
+These playback-session services are unofficial and can change independently.
+
+Library refresh failures preserve the previous cache and are not recorded as a
+successful sync. The status line reports cooldowns and incomplete refreshes;
+`:update` retries a refresh. Debug logs include HTTP status, endpoint, cooldown,
+and Spotify's quota reason, without logging authentication tokens.
+
+For a read-only compatibility check, run
+`cargo run --example probe_recommendations -- spotify:track:TRACK_ID`.
+It uses an existing playback login, starts no audio, and does not modify playlists.
