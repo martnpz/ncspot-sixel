@@ -539,7 +539,7 @@ impl WebApi {
         artist_id: &str,
         album_type: Option<AlbumType>,
     ) -> ApiResult<Album> {
-        const MAX_SIZE: u32 = 50;
+        const MAX_SIZE: u32 = 10;
         let spotify = self.clone();
         let artist_id = artist_id.to_string();
         let fetch_page = move |offset: u32| {
@@ -858,6 +858,25 @@ mod tests {
         normalize_playlist_reference(&mut playlist);
         let parsed: rspotify::model::SimplifiedPlaylist = serde_json::from_value(playlist).unwrap();
         assert_eq!(parsed.items.total, 0);
+    }
+
+    #[test]
+    #[ignore = "requires cached Web API authorization and network access"]
+    fn live_artist_releases() {
+        let cfg = Arc::new(crate::config::Config::new(None));
+        let token = crate::authentication::get_web_token(&cfg, false, false).unwrap();
+        let api = WebApi::new(cfg);
+        *api.api.token.lock().unwrap() = Some(token);
+        for group in [AlbumType::Album, AlbumType::Single] {
+            let page = api.artist_albums("43ZHCT0cAZBISjO8DG9PnE", Some(group));
+            assert!(page.first_page_loaded());
+            let initial = page.items.read().unwrap().len();
+            assert!(initial > 0);
+            if !page.at_end() {
+                assert!(!page.next().unwrap().is_empty());
+            }
+            println!("Artist {group:?}: {initial} first-page results, {} loaded after pagination", page.items.read().unwrap().len());
+        }
     }
 
     #[test]

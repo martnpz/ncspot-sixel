@@ -74,6 +74,7 @@ pub fn fetch_genres(cache: &GenresCache, spotify: &Spotify, events: &EventManage
 
 #[derive(Clone, Copy)]
 enum NowPlayingAction {
+    GoToArtist,
     AddToQueue,
     AddToPlaylist,
     RemoveFromPlaylist,
@@ -215,6 +216,13 @@ impl InfoView {
                 items.push((format!(" {icon_add_to_playlist}Add to playlist "), NowPlayingAction::AddToPlaylist));
                 items.push((format!(" {icon_remove}Remove from playlist "), NowPlayingAction::RemoveFromPlaylist));
             }
+            if playable.artists().is_some_and(|artists| !artists.is_empty()) {
+                let icon_artist = cfg.icon(IconKind::MenuArtists);
+                items.push((
+                    format!(" {icon_artist}Go to artist "),
+                    NowPlayingAction::GoToArtist,
+                ));
+            }
             // Only for tracks added by smart shuffle / recommendations.
             if playable.is_suggested() {
                 let icon_remove_rec = cfg.icon(IconKind::MenuRemoveRecommendation);
@@ -245,6 +253,13 @@ impl InfoView {
                 s.pop_layer();
 
                 match action {
+                    NowPlayingAction::GoToArtist => {
+                        if let Some(artist) = playable.artists().and_then(|artists| artists.into_iter().next())
+                            && let Some(view) = artist.open(queue_cb.clone(), library_cb.clone())
+                        {
+                            crate::ui::panes::show_view(s, view);
+                        }
+                    }
                     NowPlayingAction::AddToQueue => {
                         queue_cb.insert_after_current(playable);
                     }

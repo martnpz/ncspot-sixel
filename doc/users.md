@@ -578,6 +578,12 @@ remain outside this fallback. Browse categories are omitted and search uses ten
 results per request. Scroll down to load more search results; pagination does
 not rely on Spotify's sometimes inaccurate result totals.
 
+Artist pages load in the background. With a personal app, Top 10 uses the
+playback session; Albums and Singles use ten-item Web API pages. Related Artists
+loads Spotify's “Fans also like” list from the artist-overview service using the
+playback login. It loads independently of Top 10. These unofficial services
+can change; failures show a retry message instead of an empty result.
+
 Suggestions use Radio/Autoplay through the authenticated playback session, not
 the restricted Web API Recommendations endpoint. Smart shuffle keeps the current
 song playing and inserts one suggestion after every two playlist songs in both
