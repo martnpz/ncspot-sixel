@@ -451,8 +451,8 @@ impl View for PaneLayoutView {
                     return pane.top_mut().on_title_action();
                 }
 
-                // Right-click anywhere in the pane: open the title action
-                // (drop menu) as a fallback for panes that support it.
+                // Let result rows handle their context menu before falling back
+                // to the pane's title menu (e.g. Now Playing).
                 let is_right_click = matches!(
                     event,
                     Event::Mouse {
@@ -462,6 +462,12 @@ impl View for PaneLayoutView {
                 );
                 if is_right_click && views_count == 1 {
                     let pane = &mut self.columns[target.0].panes[target.1];
+                    let result = pane.top_mut().on_event(event.relativized(
+                        rect.top_left() + (1 + self.padding_x, 1 + self.padding_y),
+                    ));
+                    if result.is_consumed() {
+                        return result;
+                    }
                     return pane.top_mut().on_right_click();
                 }
 
@@ -550,5 +556,49 @@ impl ViewExt for PaneLayoutView {
         }
 
         Ok(result)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    struct ClickView {
+        handled: bool,
+        calls: Arc<Mutex<Vec<&'static str>>>,
+    }
+    impl View for ClickView {
+        fn draw(&self, _: &Printer) {}
+        fn on_event(&mut self, event: Event) -> EventResult {
+            if matches!(event, Event::Mouse { event: MouseEvent::Press(MouseButton::Right), .. }) {
+                self.calls.lock().unwrap().push("row");
+                if self.handled { return EventResult::consumed(); }
+            }
+            EventResult::Ignored
+        }
+    }
+    impl ViewExt for ClickView {
+        fn on_right_click(&mut self) -> EventResult {
+            self.calls.lock().unwrap().push("pane");
+            EventResult::consumed()
+        }
+    }
+
+    #[test]
+    fn result_context_menu_takes_precedence_over_pane_menu() {
+        for handled in [true, false] {
+            let calls = Arc::new(Mutex::new(Vec::new()));
+            let mut panes = PaneLayoutView::new(&LayoutConfig::default(), crate::config::Config::new_for_test(), |_| {
+                Some(Box::new(ClickView { handled, calls: calls.clone() }))
+            });
+            panes.layout(Vec2::new(100, 30));
+            let rect = panes.columns[0].panes[0].rect;
+            assert!(panes.on_event(Event::Mouse {
+                event: MouseEvent::Press(MouseButton::Right), offset: Vec2::zero(),
+                position: rect.top_left() + (1 + panes.padding_x, 1 + panes.padding_y),
+            }).is_consumed());
+            assert_eq!(*calls.lock().unwrap(), if handled { vec!["row"] } else { vec!["row", "pane"] });
+        }
     }
 }

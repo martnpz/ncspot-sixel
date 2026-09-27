@@ -326,7 +326,7 @@ impl ContextMenu {
         if let Some(t) = item.track() {
             add_separator(&mut content);
             content.add_item(
-                "Add to playlist",
+                "Save to playlist…",
                 ContextMenuAction::AddToPlaylist(Box::new(t.clone())),
             );
             content.add_item(
@@ -412,7 +412,7 @@ impl ContextMenu {
             .title(item.display_left(&library))
             .dismiss_button("Close")
             .padding(Margins::lrtb(1, 1, 1, 0))
-            .content(content.with_name("contextmenu_select"));
+            .content(ScrollView::new(content.with_name("contextmenu_select")));
         Self {
             dialog: Modal::new_ext(dialog),
         }
@@ -490,4 +490,30 @@ impl ViewWrapper for SelectArtistMenu {
 
 impl ViewWrapper for SelectArtistActionMenu {
     wrap_impl!(self.dialog: Modal<Dialog>);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{config::Config, events::EventManager};
+
+    #[test]
+    fn track_result_menu_offers_save_to_playlist() {
+        let cfg = Config::new_for_test();
+        let events = EventManager::new_for_test();
+        let spotify = Spotify::new_for_test(cfg.clone(), events.clone());
+        let library = Library::new_for_test(events.clone(), spotify.clone(), cfg.clone());
+        let queue = Arc::new(Queue::new(spotify, events, cfg, library.clone()));
+        let track: Track = serde_json::from_value(serde_json::json!({
+            "id":"test", "uri":"spotify:track:test", "title":"Search result",
+            "track_number":1, "disc_number":1, "duration":1000,
+            "artists":[], "artist_ids":[], "album_artists":[], "url":"",
+            "list_index":0, "is_local":false
+        })).unwrap();
+        let mut menu = ContextMenu::new(&track, queue, library);
+        let offers_save = menu.call_on_name("contextmenu_select", |select: &mut SelectView<ContextMenuAction>| {
+            select.iter().any(|(label, action)| label == "Save to playlist…" && matches!(action, ContextMenuAction::AddToPlaylist(_)))
+        }).unwrap();
+        assert!(offers_save);
+    }
 }

@@ -734,7 +734,7 @@ impl View for BrowserView {
 
     fn on_event(&mut self, event: Event) -> EventResult {
         if self.section == BrowserSection::Search {
-            if self.search_input_active {
+            if self.search_input_active && !matches!(event, Event::Mouse { .. }) {
                 match event {
                     Event::Char(c) => {
                         self.search_input.push(c);
@@ -768,7 +768,10 @@ impl View for BrowserView {
                     self.search_input_active = true;
                     return EventResult::consumed();
                 }
-                Event::Mouse { .. } => {
+                Event::Mouse { event: mouse, .. } => {
+                    if matches!(mouse, MouseEvent::Press(_)) {
+                        self.search_input_active = false;
+                    }
                     if let Some(results) = &mut self.search_results {
                         return results.on_event(event.relativized((0, 1)));
                     }

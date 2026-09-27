@@ -577,6 +577,10 @@ unofficial Spotify services, which can change. Ordinary friends' playlists
 remain outside this fallback. Browse categories are omitted and search uses ten
 results per request. Scroll down to load more search results; pagination does
 not rely on Spotify's sometimes inaccurate result totals.
+Right-click a song result and choose **Save to playlist…** to select a destination.
+The result menu and playlist picker scroll when needed. Mouse-wheel scrolling
+continues to work while the search field is focused; dragging the result scrollbar
+to the bottom also loads the next page.
 
 Artist pages load in the background. With a personal app, Top 10 uses the
 playback session; Albums and Singles use ten-item Web API pages. Related Artists

@@ -459,6 +459,7 @@ impl<I: ListItem + Clone> ListView<I> {
             } => {
                 if self.has_visible_scrollbars() {
                     self.scroller.drag(position.saturating_sub(offset));
+                    self.try_paginate();
                 }
             }
             Event::Mouse {
@@ -1095,5 +1096,35 @@ impl<I: ListItem + Clone> ViewExt for ListView<I> {
         };
 
         Ok(CommandResult::Ignored)
+    }
+}
+
+#[cfg(test)]
+mod scrolling_tests {
+    use super::*;
+    use crate::{config::Config, events::EventManager, model::category::Category, spotify::Spotify};
+
+    #[test]
+    fn wheel_scrolls_results_and_requests_the_next_page_at_the_bottom() {
+        let cfg = Config::new_for_test();
+        let events = EventManager::new_for_test();
+        let spotify = Spotify::new_for_test(cfg.clone(), events.clone());
+        let library = Library::new_for_test(events.clone(), spotify.clone(), cfg.clone());
+        let queue = Arc::new(Queue::new(spotify, events, cfg, library.clone()));
+        let content = Arc::new(RwLock::new((0..10).map(|id| Category { id: id.to_string(), name: id.to_string() }).collect()));
+        let mut view = ListView::new(content, queue, library);
+        let (tx, rx) = std::sync::mpsc::channel();
+        view.pagination.set(10, 20, Box::new(move |items| {
+            items.write().unwrap().extend((10..20).map(|id| Category { id: id.to_string(), name: id.to_string() }));
+            tx.send(()).unwrap();
+        }));
+        view.layout(Vec2::new(30, 4));
+        let wheel = Event::Mouse { event: MouseEvent::WheelDown, position: Vec2::new(2, 2), offset: Vec2::zero() };
+        assert!(view.on_event(wheel.clone()).is_consumed());
+        assert!(view.scroller.content_viewport().top() > 0);
+        view.on_event(wheel.clone());
+        view.on_event(wheel);
+        rx.recv_timeout(std::time::Duration::from_secs(2)).expect("scrolling must paginate");
+        assert_eq!(view.content_len(false), 20);
     }
 }
