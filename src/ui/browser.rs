@@ -469,7 +469,7 @@ impl BrowserView {
             .read()
             .unwrap()
             .iter()
-            .filter(|playlist| playlist.owner_id == SPOTIFY_OWNER_ID)
+            .filter(|playlist| playlist.owner_id == SPOTIFY_OWNER_ID || playlist.session_playlist)
             .cloned()
             .collect();
         *self.mixes_content.write().unwrap() = mixes;
@@ -705,6 +705,14 @@ impl View for BrowserView {
     }
 
     fn layout(&mut self, size: Vec2) {
+        // Refresh snapshots as background library and mix loads complete.
+        if !Arc::ptr_eq(&self.playlists_content, &self.library.playlists) {
+            let mut playlists = self.library.playlists.read().unwrap().clone();
+            playlists.sort_by_key(|p| p.name.to_lowercase());
+            *self.playlists_content.write().unwrap() = playlists;
+        }
+        if self.section == BrowserSection::Mixes { self.refresh_mixes(); }
+
         match self.section {
             BrowserSection::Friends => self.friends.layout(size),
             BrowserSection::Playlists => self.playlists.layout(size),

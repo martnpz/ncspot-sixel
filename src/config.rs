@@ -479,6 +479,8 @@ pub struct UserState {
     pub last_library_sync: Option<i64>,
     #[serde(default)]
     pub library_client_id: Option<String>,
+    #[serde(default)]
+    pub session_playlists_version: u8,
     pub playback_state: PlaybackState,
     /// Last opened playlist or album; re-fetched on startup.
     #[serde(default)]
@@ -497,6 +499,7 @@ impl Default for UserState {
             cache_version: 0,
             last_library_sync: None,
             library_client_id: None,
+            session_playlists_version: 0,
             playback_state: PlaybackState::Default,
             last_opened: None,
         }

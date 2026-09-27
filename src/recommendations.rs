@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use futures::{StreamExt, stream};
 use librespot_core::{Session, SpotifyUri};
-use librespot_metadata::audio::item::{AudioItem, UniqueFields};
+use librespot_metadata::audio::item::AudioItem;
 use librespot_protocol::autoplay_context_request::AutoplayContextRequest;
 use log::{debug, warn};
 
@@ -153,41 +153,12 @@ fn radio_page(page: &serde_json::Value) -> (Vec<String>, Option<String>) {
 }
 
 fn playable_track(item: AudioItem) -> Option<Track> {
-    if item.availability.is_err() || item.files.is_empty() {
+    let mut track = Track::from_audio_item(item)?;
+    if track.is_playable != Some(true) {
         return None;
     }
-    let id = item.track_id.to_id().ok()?;
-    let UniqueFields::Track {
-        artists,
-        album,
-        album_artists,
-        number,
-        disc_number,
-        ..
-    } = item.unique_fields
-    else {
-        return None;
-    };
-    Some(Track {
-        id: Some(id.clone()),
-        uri: item.uri,
-        title: item.name,
-        track_number: number,
-        disc_number: disc_number as i32,
-        duration: item.duration_ms,
-        artists: artists.iter().map(|a| a.name.clone()).collect(),
-        artist_ids: artists.iter().filter_map(|a| a.id.to_id().ok()).collect(),
-        album: Some(album),
-        album_id: None,
-        album_artists,
-        cover_url: item.covers.first().map(|c| c.url.clone()),
-        url: format!("https://open.spotify.com/track/{id}"),
-        added_at: None,
-        list_index: 0,
-        is_local: false,
-        is_playable: Some(true),
-        is_suggested: true,
-    })
+    track.is_suggested = true;
+    Some(track)
 }
 
 #[cfg(test)]

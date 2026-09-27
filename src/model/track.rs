@@ -41,6 +41,45 @@ pub struct Track {
 }
 
 impl Track {
+    pub(crate) fn from_audio_item(
+        item: librespot_metadata::audio::item::AudioItem,
+    ) -> Option<Self> {
+        use librespot_metadata::audio::item::UniqueFields;
+        let is_playable = item.availability.is_ok() && !item.files.is_empty();
+        let id = item.track_id.to_id().ok()?;
+        let UniqueFields::Track {
+            artists,
+            album,
+            album_artists,
+            number,
+            disc_number,
+            ..
+        } = item.unique_fields
+        else {
+            return None;
+        };
+        Some(Self {
+            id: Some(id.clone()),
+            uri: item.uri,
+            title: item.name,
+            track_number: number,
+            disc_number: disc_number as i32,
+            duration: item.duration_ms,
+            artists: artists.iter().map(|a| a.name.clone()).collect(),
+            artist_ids: artists.iter().filter_map(|a| a.id.to_id().ok()).collect(),
+            album: Some(album),
+            album_id: None,
+            album_artists,
+            cover_url: item.covers.first().map(|c| c.url.clone()),
+            url: format!("https://open.spotify.com/track/{id}"),
+            added_at: None,
+            list_index: 0,
+            is_local: false,
+            is_playable: Some(is_playable),
+            is_suggested: false,
+        })
+    }
+
     pub fn from_simplified_track(track: &SimplifiedTrack, album: &FullAlbum) -> Self {
         let artists = track
             .artists
@@ -285,11 +324,16 @@ impl ListItem for Track {
                 .recommendations(None, None, Some(vec![id]))
                 .ok()
                 .map(|r| r.tracks)
-                .map(|tracks| tracks.iter().map(|t| {
-                    let mut track = t.clone();
-                    track.is_suggested = true;
-                    track
-                }).collect())
+                .map(|tracks| {
+                    tracks
+                        .iter()
+                        .map(|t| {
+                            let mut track = t.clone();
+                            track.is_suggested = true;
+                            track
+                        })
+                        .collect()
+                })
         } else {
             None
         };

@@ -2392,6 +2392,7 @@ dependencies = [
  "notify-rust",
  "parse_duration",
  "pipewire",
+ "protobuf",
  "rand 0.10.1",
  "regex",
  "rspotify",

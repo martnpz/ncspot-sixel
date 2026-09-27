@@ -27,6 +27,7 @@ mod panic;
 mod queue;
 mod recommendations;
 mod serialization;
+mod session_playlists;
 mod sharing;
 mod spotify;
 mod spotify_api;

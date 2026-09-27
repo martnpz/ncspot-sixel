@@ -5,7 +5,7 @@ use std::path::Path;
 use std::sync::{Arc, RwLock};
 use std::thread;
 
-use log::{debug, error};
+use log::{debug, error, warn};
 use rspotify::model::Id;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -205,6 +205,9 @@ impl Library {
 
     /// True when the library hasn't been synced within [LIBRARY_SYNC_TTL_SECS].
     fn sync_due(&self) -> bool {
+        if self.cfg.values().client_id.is_some() && self.cfg.state().session_playlists_version < 1 {
+            return true;
+        }
         if self.cfg.state().library_client_id.as_deref()
             != Some(crate::authentication::web_api_client_id(&self.cfg).as_str())
         {
@@ -288,7 +291,8 @@ impl Library {
                         &library.shows.read().unwrap(),
                     );
                 }
-                if playlists && tracks && albums && artists && shows {
+                let mixes = library.fetch_session_playlists();
+                if playlists && tracks && albums && artists && shows && mixes {
                     library.mark_synced();
                 } else {
                     library.ev.send(crate::events::Event::Message(Err(
@@ -370,8 +374,77 @@ impl Library {
             }
             updated.push(playlist);
         }
+        // The Web API cannot enumerate the contents of playback-session mixes.
+        // Preserve them until the independent session refresh succeeds.
+        let web_ids: std::collections::HashSet<_> = updated.iter().map(|p| p.id.clone()).collect();
+        updated.extend(
+            local
+                .into_iter()
+                .filter(|p| p.session_playlist && !web_ids.contains(&p.id)),
+        );
         *self.playlists.write().unwrap() = updated;
         true
+    }
+
+    fn fetch_session_playlists(&self) -> bool {
+        if self.cfg.values().client_id.is_none() {
+            return true;
+        }
+        let Some(session) = self.spotify.session() else {
+            return false;
+        };
+        let runtime = crate::application::ASYNC_RUNTIME.get().unwrap();
+        let remote = match runtime.block_on(crate::session_playlists::saved_mixes(&session)) {
+            Ok(remote) => remote,
+            Err(e) => {
+                warn!("Saved mix enumeration failed: {e}");
+                return false;
+            }
+        };
+        let remote_ids: std::collections::HashSet<_> =
+            remote.iter().map(|p| p.id.clone()).collect();
+        let local = self.playlists.read().unwrap().clone();
+        let mut complete = true;
+        for mut playlist in remote {
+            let cached = local
+                .iter()
+                .find(|p| p.id == playlist.id && p.session_playlist);
+            match runtime.block_on(crate::session_playlists::tracks(
+                &session, &playlist, cached,
+            )) {
+                Ok((tracks, revision)) => {
+                    playlist.num_tracks = tracks.len();
+                    playlist.tracks = Some(tracks);
+                    playlist.snapshot_id = revision;
+                }
+                Err(e) => {
+                    warn!("Saved mix contents failed: {e}");
+                    complete = false;
+                    continue;
+                }
+            }
+            {
+                let mut store = self.playlists.write().unwrap();
+                if let Some(existing) = store.iter_mut().find(|p| p.id == playlist.id) {
+                    *existing = playlist;
+                } else {
+                    store.push(playlist);
+                }
+            }
+            self.trigger_redraw();
+        }
+        if complete {
+            self.playlists
+                .write()
+                .unwrap()
+                .retain(|p| !p.session_playlist || remote_ids.contains(&p.id));
+            self.cfg.with_state_mut(|s| s.session_playlists_version = 1);
+        }
+        self.save_cache(
+            &config::cache_path(CACHE_PLAYLISTS),
+            &self.playlists.read().unwrap(),
+        );
+        complete
     }
 
     /// Fetch the artists from the web API and save them to the local library.
@@ -949,6 +1022,7 @@ mod tests {
             num_tracks: 0,
             tracks: Some(vec![]),
             collaborative: false,
+            session_playlist: false,
             cover_url: None,
         };
         library.playlists.write().unwrap().push(playlist);
@@ -960,6 +1034,24 @@ mod tests {
         assert_eq!(playlists[0].snapshot_id, "snapshot");
         assert!(playlists[0].tracks.is_some());
         assert_eq!(cfg.state().last_library_sync, Some(123));
+    }
+
+    #[test]
+    fn first_mix_import_forces_refresh_even_with_a_fresh_web_cache() {
+        let cfg = Config::new_for_test_with_values(crate::config::ConfigValues {
+            client_id: Some("11111111111111111111111111111111".to_owned()),
+            ..Default::default()
+        });
+        let events = EventManager::new_for_test();
+        let spotify = Spotify::new_for_test(cfg.clone(), events.clone());
+        let library = Library::new_for_test(events, spotify, cfg.clone());
+        cfg.with_state_mut(|s| {
+            s.last_library_sync = Some(chrono::Utc::now().timestamp());
+            s.library_client_id = Some(crate::authentication::web_api_client_id(&cfg));
+        });
+        assert!(library.sync_due());
+        cfg.with_state_mut(|s| s.session_playlists_version = 1);
+        assert!(!library.sync_due());
     }
 
     #[test]

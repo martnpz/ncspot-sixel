@@ -26,14 +26,29 @@ pub struct Playlist {
     pub num_tracks: usize,
     pub tracks: Option<Vec<Playable>>,
     pub collaborative: bool,
+    #[serde(default)]
+    pub session_playlist: bool,
     pub cover_url: Option<String>,
 }
 
 impl Playlist {
     pub fn load_tracks(&mut self, spotify: &Spotify) {
         if self.tracks.is_none() {
-            self.tracks = spotify.api.user_playlist_tracks(&self.id).all();
-            if let Some(tracks) = &self.tracks { self.num_tracks = tracks.len(); }
+            self.tracks = if self.session_playlist {
+                spotify.session().and_then(|session| {
+                    crate::application::ASYNC_RUNTIME
+                        .get()?
+                        .block_on(crate::session_playlists::tracks(&session, self, None))
+                        .map(|(tracks, _)| tracks)
+                        .map_err(|e| warn!("Could not load saved mix: {e}"))
+                        .ok()
+                })
+            } else {
+                spotify.api.user_playlist_tracks(&self.id).all()
+            };
+            if let Some(tracks) = &self.tracks {
+                self.num_tracks = tracks.len();
+            }
         }
     }
 
@@ -107,6 +122,7 @@ impl From<&SimplifiedPlaylist> for Playlist {
             num_tracks: list.items.total as usize,
             tracks: None,
             collaborative: list.collaborative,
+            session_playlist: false,
             cover_url: list.images.first().map(|i| i.url.clone()),
         }
     }
@@ -123,6 +139,7 @@ impl From<&FullPlaylist> for Playlist {
             num_tracks: list.items.total as usize,
             tracks: None,
             collaborative: list.collaborative,
+            session_playlist: false,
             cover_url: list.images.first().map(|i| i.url.clone()),
         }
     }
@@ -327,7 +344,6 @@ impl ListItem for Playlist {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -340,10 +356,16 @@ mod tests {
         let library = Library::new_for_test(events.clone(), spotify.clone(), cfg.clone());
         let queue = Arc::new(Queue::new(spotify, events, cfg, library.clone()));
         library.playlists.write().unwrap().push(Playlist {
-            id: "test-playlist".to_owned(), name: "Cached playlist".to_owned(),
-            owner_id: "owner".to_owned(), owner_name: None,
-            snapshot_id: "snapshot".to_owned(), num_tracks: 0, tracks: Some(vec![]),
-            collaborative: false, cover_url: None,
+            id: "test-playlist".to_owned(),
+            name: "Cached playlist".to_owned(),
+            owner_id: "owner".to_owned(),
+            owner_name: None,
+            snapshot_id: "snapshot".to_owned(),
+            num_tracks: 0,
+            tracks: Some(vec![]),
+            collaborative: false,
+            session_playlist: false,
+            cover_url: None,
         });
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
@@ -352,7 +374,9 @@ mod tests {
             let opened = playlists[0].open(queue, library.clone()).is_some();
             tx.send(opened).unwrap();
         });
-        assert!(rx.recv_timeout(std::time::Duration::from_secs(2))
-            .expect("opening a cached playlist deadlocked on its library lock"));
+        assert!(
+            rx.recv_timeout(std::time::Duration::from_secs(2))
+                .expect("opening a cached playlist deadlocked on its library lock")
+        );
     }
 }

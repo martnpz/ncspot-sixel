@@ -564,9 +564,18 @@ then run `ncspot authorize` and complete the browser login. No client secret is
 required. Restart after changing these settings. Each app uses a separate token
 cache; the bundled app's existing token is preserved.
 
-Personal development-mode apps load owned and collaborative playlists. Other
-people's and Spotify-generated playlist contents are restricted by Spotify.
-Browse categories are omitted and search uses ten results per page.
+Personal development-mode apps use the Web API for owned and collaborative
+playlists. Saved Spotify-generated mixes and Blend playlists are read through
+the existing playback session and appear in Playlists and Mixes. Save Discover
+Weekly, Release Radar, Daily Mix or Blend in the official Spotify app first, then
+run `:update` in ncspot. This reads the actual playlist, not a generated substitute.
+
+Mix contents load in the background. Unchanged revisions reuse the cache;
+changed playlists refresh on the normal library schedule or with `:update`.
+Failed reads preserve cached contents. This workaround is read-only and uses
+unofficial Spotify services, which can change. Ordinary friends' playlists
+remain outside this fallback. Browse categories are omitted and search uses ten
+results per page.
 
 Suggestions use Radio/Autoplay through the authenticated playback session, not
 the restricted Web API Recommendations endpoint. Smart shuffle keeps the current
@@ -582,6 +591,6 @@ successful sync. The status line reports cooldowns and incomplete refreshes;
 `:update` retries a refresh. Debug logs include HTTP status, endpoint, cooldown,
 and Spotify's quota reason, without logging authentication tokens.
 
-For a read-only compatibility check, run
-`cargo run --example probe_recommendations -- spotify:track:TRACK_ID`.
+For a read-only mix compatibility check, run
+`cargo test --bin ncspot live_saved_mixes_and_blend -- --ignored --nocapture`.
 It uses an existing playback login, starts no audio, and does not modify playlists.
